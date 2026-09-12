@@ -1,0 +1,21 @@
+# Rust build output and rustfmt backups. Keep Cargo.lock for this application.
+/target/
+**/*.rs.bk
+
+# Nix build links and direnv's local environment cache. Keep flake.lock and .envrc.
+/.direnv/
+/result
+/result-*
+
+# Local environment variables; allow checked-in templates.
+.env
+.env.*
+!.env.example
+!.env.sample
+
+# Editor temporary files and OS metadata.
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
