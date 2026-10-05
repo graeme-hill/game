@@ -43,6 +43,10 @@
               cmake
               gdb
               vulkan-tools
+              xorg-server
+              xauth
+              xdotool
+              (python3.withPackages (ps: [ ps.pillow ]))
             ];
 
             buildInputs = libraries;

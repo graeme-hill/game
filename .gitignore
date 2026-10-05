@@ -1,5 +1,9 @@
 # Rust build output and rustfmt backups. Keep Cargo.lock for this application.
 /target/
+/.cargo-cache/
+/artifacts/
+/data/
+__pycache__/
 **/*.rs.bk
 
 # Nix build links and direnv's local environment cache. Keep flake.lock and .envrc.

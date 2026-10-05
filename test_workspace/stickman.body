@@ -1,0 +1,230 @@
+{
+  "version": 1,
+  "resource": {
+    "id": 1,
+    "name": "Stickman body",
+    "bones": [
+      {
+        "id": 2,
+        "name": "Torso",
+        "parent": null,
+        "offset": [
+          0.0,
+          1.55,
+          0.0
+        ],
+        "tip": [
+          0.0,
+          0.9,
+          0.0
+        ],
+        "radius": 0.16,
+        "shape": "Capsule",
+        "color": [
+          0.18,
+          0.72,
+          0.65
+        ]
+      },
+      {
+        "id": 3,
+        "name": "Head",
+        "parent": 2,
+        "offset": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "tip": [
+          0.0,
+          0.39,
+          0.0
+        ],
+        "radius": 0.3,
+        "shape": "Sphere",
+        "color": [
+          0.18,
+          0.72,
+          0.65
+        ]
+      },
+      {
+        "id": 4,
+        "name": "Left upper arm",
+        "parent": 2,
+        "offset": [
+          -0.12,
+          -0.05,
+          0.0
+        ],
+        "tip": [
+          -0.4,
+          -0.48,
+          0.0
+        ],
+        "radius": 0.085,
+        "shape": "Capsule",
+        "color": [
+          0.18,
+          0.72,
+          0.65
+        ]
+      },
+      {
+        "id": 5,
+        "name": "Left lower arm",
+        "parent": 4,
+        "offset": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "tip": [
+          -0.17,
+          -0.55,
+          0.1
+        ],
+        "radius": 0.07,
+        "shape": "Capsule",
+        "color": [
+          0.18,
+          0.72,
+          0.65
+        ]
+      },
+      {
+        "id": 6,
+        "name": "Left upper leg",
+        "parent": 2,
+        "offset": [
+          -0.12,
+          -0.9,
+          0.0
+        ],
+        "tip": [
+          -0.16,
+          -0.7,
+          0.1
+        ],
+        "radius": 0.1,
+        "shape": "Capsule",
+        "color": [
+          0.18,
+          0.72,
+          0.65
+        ]
+      },
+      {
+        "id": 7,
+        "name": "Left lower leg",
+        "parent": 6,
+        "offset": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "tip": [
+          -0.05,
+          -0.75,
+          -0.1
+        ],
+        "radius": 0.09,
+        "shape": "Capsule",
+        "color": [
+          0.18,
+          0.72,
+          0.65
+        ]
+      },
+      {
+        "id": 8,
+        "name": "Right upper arm",
+        "parent": 2,
+        "offset": [
+          0.12,
+          -0.05,
+          0.0
+        ],
+        "tip": [
+          0.4,
+          -0.48,
+          0.0
+        ],
+        "radius": 0.085,
+        "shape": "Capsule",
+        "color": [
+          0.18,
+          0.72,
+          0.65
+        ]
+      },
+      {
+        "id": 9,
+        "name": "Right lower arm",
+        "parent": 8,
+        "offset": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "tip": [
+          0.17,
+          -0.55,
+          0.1
+        ],
+        "radius": 0.07,
+        "shape": "Capsule",
+        "color": [
+          0.18,
+          0.72,
+          0.65
+        ]
+      },
+      {
+        "id": 10,
+        "name": "Right upper leg",
+        "parent": 2,
+        "offset": [
+          0.12,
+          -0.9,
+          0.0
+        ],
+        "tip": [
+          0.16,
+          -0.7,
+          0.1
+        ],
+        "radius": 0.1,
+        "shape": "Capsule",
+        "color": [
+          0.18,
+          0.72,
+          0.65
+        ]
+      },
+      {
+        "id": 11,
+        "name": "Right lower leg",
+        "parent": 10,
+        "offset": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "tip": [
+          0.05,
+          -0.75,
+          -0.1
+        ],
+        "radius": 0.09,
+        "shape": "Capsule",
+        "color": [
+          0.18,
+          0.72,
+          0.65
+        ]
+      }
+    ],
+    "mounts": []
+  }
+}
