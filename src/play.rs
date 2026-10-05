@@ -21,8 +21,11 @@ pub struct GameSession {
     position: Vec3,
     center: Vec3,
     radius: f32,
+    terrain: game::terrain_collision::TerrainCollision,
+    height: f32,
 }
 impl GameSession {
+    #[cfg(test)]
     pub fn load(workspace: &Path) -> Result<Self, String> {
         if !workspace.is_dir() {
             return Err(format!(
@@ -30,7 +33,24 @@ impl GameSession {
                 workspace.display()
             ));
         }
-        let library = storage::load_workspace(workspace)?;
+        Self::load_world(workspace, None)
+    }
+    pub fn load_world(workspace: &Path, world: Option<u32>) -> Result<Self, String> {
+        if !workspace.is_dir() {
+            return Err(format!(
+                "Workspace is not a directory: {}",
+                workspace.display()
+            ));
+        }
+        let mut library = storage::load_workspace(workspace)?;
+        if let Some(id) = world {
+            let n = library
+                .worlds
+                .iter()
+                .position(|w| w.id == id)
+                .ok_or_else(|| format!("Missing world {id}"))?;
+            library.worlds.swap(0, n);
+        }
         let character = library
             .characters
             .first()
@@ -47,7 +67,16 @@ impl GameSession {
         let position = Vec3::new(-midpoint.x, -lower.y, -midpoint.z);
         let center = midpoint + position;
         let radius = ((upper - lower).length() * 0.5 + 0.2).max(0.5);
+        let height = (upper.y - lower.y).max(0.5);
+        let terrain = if let Some(w) = library.worlds.first() {
+            game::tiles::validate_world(w, &library.tiles, &library.socket_rules, true)?;
+            game::terrain_collision::TerrainCollision::from_world(w, &library.tiles)?
+        } else {
+            Default::default()
+        };
         Ok(Self {
+            terrain,
+            height,
             library,
             workspace: workspace.into(),
             position,
@@ -68,22 +97,26 @@ struct ContactShadow;
 pub struct GamePlugin;
 impl Plugin for GamePlugin {
     fn build(&self, app: &mut App) {
-        app.insert_resource(ClearColor(Color::srgb(0.16, 0.21, 0.29)))
-            .init_resource::<PlayerInput>()
-            .init_resource::<FollowCamera>()
-            .add_systems(Startup, (spawn_character, setup_environment))
-            .add_systems(
-                Update,
-                (
-                    read_input,
-                    move_player,
-                    animate_player,
-                    follow_camera,
-                    update_hud,
-                )
-                    .chain(),
+        app.insert_resource(GlobalAmbientLight {
+            brightness: 400.,
+            ..default()
+        })
+        .insert_resource(ClearColor(Color::srgb(0.16, 0.21, 0.29)))
+        .init_resource::<PlayerInput>()
+        .init_resource::<FollowCamera>()
+        .add_systems(Startup, (spawn_character, setup_environment, spawn_world))
+        .add_systems(
+            Update,
+            (
+                read_input,
+                move_player,
+                animate_player,
+                follow_camera,
+                update_hud,
             )
-            .add_systems(PostUpdate, snapshot);
+                .chain(),
+        )
+        .add_systems(PostUpdate, snapshot);
     }
 }
 fn spawn_character(
@@ -96,12 +129,24 @@ fn spawn_character(
     for &entity in &parts {
         renderer.commands.entity(entity).insert(PlayerCharacter);
     }
-    renderer
-        .commands
-        .entity(parts[0])
-        .insert(PlayerController::default());
-    camera.target = session.center;
+    renderer.commands.entity(parts[0]).insert(PlayerController {
+        position: session
+            .library
+            .worlds
+            .first()
+            .map_or(Vec3::ZERO, |w| Vec3::from_array(w.spawn)),
+        ..default()
+    });
+    camera.target = session.center
+        + session
+            .library
+            .worlds
+            .first()
+            .map_or(Vec3::ZERO, |w| Vec3::from_array(w.spawn));
     camera.distance = (session.radius * 3.8).max(5.);
+    if let Some(world) = session.library.worlds.first() {
+        camera.yaw = world.spawn_yaw;
+    }
     info!(
         "game_character_spawned id={} name={} workspace={}",
         character.id,
@@ -109,40 +154,52 @@ fn spawn_character(
         session.workspace.display()
     );
 }
+fn spawn_world(session: Res<GameSession>, mut renderer: CharacterRenderer) {
+    if let Some(world) = session.library.worlds.first() {
+        for i in &world.instances {
+            if let Ok(t) = game::tiles::tile(&session.library.tiles, i.tile) {
+                renderer.tile(t, i.transform());
+            }
+        }
+    }
+}
 fn setup_environment(
+    session: Res<GameSession>,
     mut commands: Commands,
     assets: Res<AssetServer>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    commands.spawn((
-        Name::new("Ground plane"),
-        Mesh3d(meshes.add(Plane3d::default().mesh().size(200., 200.))),
-        MeshMaterial3d(materials.add(StandardMaterial {
-            base_color: Color::srgb(0.29, 0.35, 0.40),
-            perceptual_roughness: 1.,
+    if session.library.worlds.is_empty() {
+        commands.spawn((
+            Name::new("Ground plane"),
+            Mesh3d(meshes.add(Plane3d::default().mesh().size(200., 200.))),
+            MeshMaterial3d(materials.add(StandardMaterial {
+                base_color: Color::srgb(0.29, 0.35, 0.40),
+                perceptual_roughness: 1.,
+                ..default()
+            })),
+        ));
+        // Low-contrast paving gives movement and camera orbit a readable reference.
+        let line_material = materials.add(StandardMaterial {
+            base_color: Color::srgb(0.25, 0.31, 0.36),
+            unlit: true,
             ..default()
-        })),
-    ));
-    // Low-contrast paving gives movement and camera orbit a readable reference.
-    let line_material = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.25, 0.31, 0.36),
-        unlit: true,
-        ..default()
-    });
-    let line_mesh = meshes.add(Cuboid::new(0.025, 0.004, 200.));
-    for index in -25..=25 {
-        for rotated in [false, true] {
-            commands.spawn((
-                Mesh3d(line_mesh.clone()),
-                MeshMaterial3d(line_material.clone()),
-                if rotated {
-                    Transform::from_xyz(0., 0.003, index as f32 * 4.)
-                        .with_rotation(Quat::from_rotation_y(std::f32::consts::FRAC_PI_2))
-                } else {
-                    Transform::from_xyz(index as f32 * 4., 0.003, 0.)
-                },
-            ));
+        });
+        let line_mesh = meshes.add(Cuboid::new(0.025, 0.004, 200.));
+        for index in -25..=25 {
+            for rotated in [false, true] {
+                commands.spawn((
+                    Mesh3d(line_mesh.clone()),
+                    MeshMaterial3d(line_material.clone()),
+                    if rotated {
+                        Transform::from_xyz(0., 0.003, index as f32 * 4.)
+                            .with_rotation(Quat::from_rotation_y(std::f32::consts::FRAC_PI_2))
+                    } else {
+                        Transform::from_xyz(index as f32 * 4., 0.003, 0.)
+                    },
+                ));
+            }
         }
     }
     commands.spawn((
@@ -261,6 +318,7 @@ fn read_input(
     }
 }
 fn move_player(
+    session: Res<GameSession>,
     input: Res<PlayerInput>,
     mut camera: ResMut<FollowCamera>,
     time: Res<Time>,
@@ -273,7 +331,22 @@ fn move_player(
         if input.recenter {
             camera.yaw = player.facing;
         }
-        step_player(&mut player, &input, camera.yaw, time.delta_secs());
+        if session.library.worlds.is_empty() {
+            step_player(&mut player, &input, camera.yaw, time.delta_secs());
+        } else {
+            game::terrain_collision::step_on_terrain(
+                &mut player,
+                &input,
+                camera.yaw,
+                time.delta_secs(),
+                &session.terrain,
+                session.height,
+            );
+            if player.position.y < -10. {
+                player.position = Vec3::from_array(session.library.worlds[0].spawn);
+                player.vertical_speed = 0.;
+            }
+        }
     }
 }
 fn animate_player(
@@ -340,8 +413,19 @@ fn follow_camera(
     ) * distance;
     let mut position = follow.target + offset;
     position.y = position.y.max(0.3); // The only camera obstacle in this scene is the ground.
+    if !session.library.worlds.is_empty() {
+        position = session.terrain.camera_position(follow.target, position);
+    }
     **camera = Transform::from_translation(position).looking_at(follow.target, Vec3::Y);
-    shadow.translation = Vec3::new(player.position.x, 0.015, player.position.z);
+    shadow.translation = Vec3::new(
+        player.position.x,
+        session
+            .terrain
+            .ground(player.position, player.position.y + 0.01, 0.05)
+            .unwrap_or(0.)
+            + 0.015,
+        player.position.z,
+    );
     shadow.scale = Vec3::splat((1. - player.position.y * 0.12).clamp(0.4, 1.));
 }
 fn update_hud(
@@ -378,7 +462,7 @@ fn snapshot(
         return;
     }
     let json = serde_json::json!({"mode":"Game","window":[window.resolution.physical_width(),window.resolution.physical_height()],
-        "workspace":session.workspace,"character":session.library.characters[0],"spawned_parts":parts.iter().len(),
+        "world":session.library.worlds.first(),"collision_boxes":session.terrain.boxes.len(),"workspace":session.workspace,"character":session.library.characters[0],"spawned_parts":parts.iter().len(),
         "position":player.position.to_array(),"speed":player.velocity.length(),"facing":player.facing,"grounded":player.grounded,
         "phase":player.phase,"weights":player.weights,"camera_target":camera.target.to_array(),"camera_yaw":camera.yaw,
         "camera_pitch":camera.pitch,"camera_distance":camera.distance,"captured":camera.captured,"controls":[]});

@@ -20,13 +20,16 @@ SIZES = [(1280, 720), (1600, 900), (800, 600), (640, 480), (1280, 720)]
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mode", choices=["editor", "game"], default="editor")
-    parser.add_argument("--editor-view", choices=["bodies", "props", "characters"])
+    parser.add_argument("--editor-view", choices=["bodies", "props", "characters", "tiles", "worlds"])
+    parser.add_argument("--default-launch", action="store_true", help="Verify game/workspace defaults in an isolated directory")
     args = parser.parse_args()
     if args.mode == "game" and args.editor_view:
         parser.error("--editor-view requires --mode editor")
+    if args.default_launch and args.mode != "game":
+        parser.error("--default-launch requires --mode game")
     output = ROOT / "artifacts" / f"resize-{args.mode}-{time.strftime('%Y%m%d-%H%M%S')}-{os.getpid()}"
     output.mkdir(parents=True)
-    data = output / "data"
+    data = output / ("test_workspace" if args.default_launch else "data")
     if args.mode == "game" or args.editor_view:
         shutil.copytree(ROOT / "test_workspace", data)
 
@@ -57,20 +60,21 @@ def main():
     env.update(VK_DRIVER_FILES=str(drivers[-1]), VK_ICD_FILENAMES=str(drivers[-1]))
     read_fd, write_fd = os.pipe()
     xvfb = game = None
-    report = {"status": "failed", "mode": args.mode, "sizes": SIZES, "renderer": "Mesa software Vulkan"}
+    report = {"status": "failed", "mode": args.mode, "default_launch": args.default_launch,
+              "sizes": SIZES, "renderer": "Mesa software Vulkan"}
     try:
         xvfb = subprocess.Popen(["Xvfb", "-displayfd", str(write_fd), "-screen", "0", "1600x900x24", "-nolisten", "tcp", "-ac"],
                                 pass_fds=(write_fd,), stdout=(output / "xvfb.log").open("w"), stderr=subprocess.STDOUT, env=env)
         os.close(write_fd)
         if not select.select([read_fd], [], [], 15)[0]:
             raise RuntimeError("Xvfb did not start")
-        display = os.read(read_fd, 64).decode().strip()
-        os.close(read_fd)
+        with os.fdopen(read_fd) as display_pipe:
+            display = display_pipe.readline().strip()
         env["DISPLAY"] = ":" + display
         if args.mode == "game":
             # These failures must be handled before any window opens.
             for name, arguments, code, message in [
-                ("missing-argument", ["--mode", "game"], 2, "requires --workspace"),
+                ("missing-argument", ["--workspace"], 2, "requires a value"),
                 ("missing-directory", ["--mode", "game", "--workspace", str(output / "absent")], 1, "not a directory"),
                 ("empty-workspace", ["--mode", "game", "--workspace", str(output / "empty")], 1, "No characters"),
             ]:
@@ -80,14 +84,15 @@ def main():
                 (output / f"{name}.log").write_text(result.stdout)
                 assert result.returncode == code and message in result.stdout, result.stdout
         command = [str(ROOT / "target/debug/game"), "--state-file", str(state_path), "--output-dir", str(output)]
-        command += ["--mode", "game", "--workspace", str(data)] if args.mode == "game" else ["--data-dir", str(data)]
+        if not args.default_launch:
+            command += ["--mode", "game", "--workspace", str(data)] if args.mode == "game" else ["--mode", "editor", "--data-dir", str(data)]
         if args.editor_view:
             command += ["--mode", "editor", "--workspace", str(data), "--editor-view", args.editor_view]
         ready_capture = output / f"{args.mode}-ready.png"
         command += ["--capture", str(ready_capture), "--capture-frame", "60"]
         with (output / "game.log").open("w") as log:
             game = subprocess.Popen(command,
-                                    cwd=ROOT, env=env, stdout=log, stderr=subprocess.STDOUT)
+                                    cwd=output if args.default_launch else ROOT, env=env, stdout=log, stderr=subprocess.STDOUT)
 
         def state():
             try:
@@ -125,7 +130,7 @@ def main():
                 if args.mode == "game":
                     pixels = image.convert("RGB")
                     body = [(x, y) for y in range(height) for x in range(width)
-                            if (lambda r, g, b: g > r * 1.5 and g > b * 1.03 and g > 55)(*pixels.getpixel((x, y))) ]
+                            if (lambda r, g, b: g > r * 1.5 and g > b * 1.03 and b > r * 1.5 and g > 55)(*pixels.getpixel((x, y))) ]
                     assert len(body) > width * height * 0.008, "Character surface missing"
                     assert min(x for x, _ in body) > 0 and max(x for x, _ in body) < width - 1
                     assert min(y for _, y in body) > 0 and max(y for _, y in body) < height - 1

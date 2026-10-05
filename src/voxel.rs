@@ -215,7 +215,11 @@ fn quads(cells: &[Cell]) -> Vec<Quad> {
 }
 
 pub fn build_mesh(prop: &Prop) -> Mesh {
-    let faces = quads(&occupancy(prop));
+    build_cells_mesh(&occupancy(prop))
+}
+
+pub fn build_cells_mesh(cells: &[Option<[f32; 3]>]) -> Mesh {
+    let faces = quads(cells);
     let mut positions = Vec::new();
     let mut normals = Vec::new();
     let mut colors = Vec::new();

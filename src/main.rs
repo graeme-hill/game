@@ -5,6 +5,7 @@ mod editor_scene;
 #[cfg(test)]
 mod editor_tests;
 mod editor_ui;
+mod editor_world;
 mod launch;
 mod play;
 mod verification;
@@ -34,15 +35,17 @@ fn main() -> bevy::app::AppExit {
         LaunchMode::Editor => {
             app.insert_resource(Editor::new(&options));
         }
-        LaunchMode::Game => match play::GameSession::load(options.workspace_dir()) {
-            Ok(session) => {
-                app.insert_resource(session);
+        LaunchMode::Game => {
+            match play::GameSession::load_world(options.workspace_dir(), options.world) {
+                Ok(session) => {
+                    app.insert_resource(session);
+                }
+                Err(error) => {
+                    eprintln!("Cannot start game: {error}");
+                    return AppExit::error();
+                }
             }
-            Err(error) => {
-                eprintln!("Cannot start game: {error}");
-                return AppExit::error();
-            }
-        },
+        }
     }
     app.insert_resource(options)
         .insert_resource(ClearColor(Color::srgb(0.012, 0.014, 0.017)))

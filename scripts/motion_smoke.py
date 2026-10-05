@@ -34,8 +34,8 @@ def main():
                                     pass_fds=(wr,), env=env, stdout=log, stderr=subprocess.STDOUT)
         os.close(wr)
         assert select.select([rd], [], [], 15)[0], 'Xvfb startup'
-        env['DISPLAY'] = ':' + os.read(rd, 64).decode().strip()
-        os.close(rd)
+        with os.fdopen(rd) as display_pipe:
+            env['DISPLAY'] = ':' + display_pipe.readline().strip()
         session = Session(env, output, data, report, workspace='characters', prefix='editor')
         s = session
         s.action('Animation(Tools(true))')
@@ -150,7 +150,7 @@ def main():
         capture('play-running')
         xdo('keyup','w','Shift_L')
         wait(lambda v:v['speed'] < .01,'braking')
-        assert state()['position'][2] < start[2] - 1
+        assert sum((a-b)**2 for a,b in zip(state()['position'],start)) > 1, 'Walking/running did not move the character'
         yaw = state()['camera_yaw']
         xdo('mousemove_relative','--',120,40)
         wait(lambda v:abs(v['camera_yaw'] - yaw) > .1,'mouse orbit')

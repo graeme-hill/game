@@ -23,10 +23,18 @@ pub enum Mode {
     Bodies,
     Props,
     Characters,
+    Tiles,
+    Worlds,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Target {
     Asset,
+    TileCategory,
+    SocketName,
+    SocketType,
+    SocketProfile,
+    RuleLeft,
+    RuleRight,
     Workspace,
     Bone,
     Mount,
@@ -46,6 +54,7 @@ pub enum VectorField {
 }
 #[derive(Clone, Debug)]
 pub enum Action {
+    World(crate::editor_world::WorldAction),
     Animation(AnimationAction),
     Navigate(Mode),
     OpenBody(usize),
@@ -123,6 +132,7 @@ pub struct Editor {
     pub body: usize,
     pub prop: usize,
     pub character: usize,
+    pub world_tools: crate::editor_world::WorldTools,
     pub bone: usize,
     pub mount: usize,
     pub anchor: usize,
@@ -163,6 +173,8 @@ impl Editor {
             Err(e) => (Library::default(), format!("Load failed: {e}")),
         };
         let mode = match options.editor_view.as_deref() {
+            Some("tiles") => Mode::Tiles,
+            Some("worlds") => Mode::Worlds,
             Some("bodies") => Mode::Bodies,
             Some("props") => Mode::Props,
             Some("characters") => Mode::Characters,
@@ -173,7 +185,7 @@ impl Editor {
             Mode::Bodies => !library.bodies.is_empty(),
             Mode::Props => !library.props.is_empty(),
             Mode::Characters => !library.characters.is_empty(),
-            Mode::Menu => false,
+            Mode::Tiles | Mode::Worlds | Mode::Menu => false,
         };
         let open_documents = if has_document {
             vec![OpenDocument { mode, index: 0 }]
@@ -187,6 +199,7 @@ impl Editor {
             body: 0,
             prop: 0,
             character: 0,
+            world_tools: Default::default(),
             bone: 0,
             mount: 0,
             anchor: 0,
@@ -204,9 +217,18 @@ impl Editor {
             notice,
             naming: None,
             yaw: 0.45,
-            pitch: -0.12,
+            pitch: if matches!(mode, Mode::Tiles | Mode::Worlds) {
+                0.65
+            } else {
+                -0.12
+            },
             pan: Vec3::ZERO,
-            distance: if mode == Mode::Props { 6.5 } else { 5.0 },
+            distance: match mode {
+                Mode::Tiles => 24.,
+                Mode::Worlds => 175.,
+                Mode::Props => 6.5,
+                _ => 5.,
+            },
             guides: true,
             workspace_ready: options.workspace.is_some()
                 || options.editor_view.is_some()
@@ -239,6 +261,20 @@ impl Editor {
         }
     }
     pub fn clamp(&mut self) {
+        self.world_tools.tile = self
+            .world_tools
+            .tile
+            .min(self.library.tiles.len().saturating_sub(1));
+        self.world_tools.world = self
+            .world_tools
+            .world
+            .min(self.library.worlds.len().saturating_sub(1));
+        self.world_tools.instance = self.world_tools.instance.min(
+            self.library
+                .worlds
+                .get(self.world_tools.world)
+                .map_or(0, |w| w.instances.len().saturating_sub(1)),
+        );
         self.body = self.body.min(self.library.bodies.len().saturating_sub(1));
         self.prop = self.prop.min(self.library.props.len().saturating_sub(1));
         self.character = self
@@ -272,11 +308,38 @@ impl Editor {
     }
     fn name(&self, target: Target) -> String {
         match target {
+            Target::TileCategory => self
+                .library
+                .tiles
+                .get(self.world_tools.tile)
+                .map(|t| t.category.clone()),
+            Target::SocketName | Target::SocketType | Target::SocketProfile => self
+                .library
+                .tiles
+                .get(self.world_tools.tile)
+                .and_then(|t| t.sockets.get(self.world_tools.socket))
+                .map(|s| match target {
+                    Target::SocketName => s.name.clone(),
+                    Target::SocketType => s.kind.clone(),
+                    _ => s.profile.clone(),
+                }),
+            Target::RuleLeft => Some(self.world_tools.rule_left.clone()),
+            Target::RuleRight => Some(self.world_tools.rule_right.clone()),
             Target::Animation => self.animation_clip().map(|clip| clip.name.clone()),
             Target::Asset => match self.mode {
                 Mode::Bodies => self.body().map(|b| b.name.clone()),
                 Mode::Props => self.prop().map(|p| p.name.clone()),
                 Mode::Characters => self.character().map(|c| c.name.clone()),
+                Mode::Tiles => self
+                    .library
+                    .tiles
+                    .get(self.world_tools.tile)
+                    .map(|t| t.name.clone()),
+                Mode::Worlds => self
+                    .library
+                    .worlds
+                    .get(self.world_tools.world)
+                    .map(|w| w.name.clone()),
                 _ => None,
             },
             Target::Workspace => Some(self.workspace_dir.display().to_string()),
@@ -297,6 +360,23 @@ impl Editor {
     }
     fn set_name(&mut self, target: Target, name: String) {
         let slot = match target {
+            Target::TileCategory => self
+                .library
+                .tiles
+                .get_mut(self.world_tools.tile)
+                .map(|t| &mut t.category),
+            Target::SocketName | Target::SocketType | Target::SocketProfile => self
+                .library
+                .tiles
+                .get_mut(self.world_tools.tile)
+                .and_then(|t| t.sockets.get_mut(self.world_tools.socket))
+                .map(|s| match target {
+                    Target::SocketName => &mut s.name,
+                    Target::SocketType => &mut s.kind,
+                    _ => &mut s.profile,
+                }),
+            Target::RuleLeft => Some(&mut self.world_tools.rule_left),
+            Target::RuleRight => Some(&mut self.world_tools.rule_right),
             Target::Animation => self
                 .library
                 .characters
@@ -304,6 +384,16 @@ impl Editor {
                 .and_then(|c| c.animations.get_mut(self.animation.selected))
                 .map(|clip| &mut clip.name),
             Target::Asset => match self.mode {
+                Mode::Tiles => self
+                    .library
+                    .tiles
+                    .get_mut(self.world_tools.tile)
+                    .map(|t| &mut t.name),
+                Mode::Worlds => self
+                    .library
+                    .worlds
+                    .get_mut(self.world_tools.world)
+                    .map(|w| &mut w.name),
                 Mode::Bodies => self.library.bodies.get_mut(self.body).map(|b| &mut b.name),
                 Mode::Props => self.library.props.get_mut(self.prop).map(|p| &mut p.name),
                 Mode::Characters => self
@@ -339,6 +429,12 @@ impl Editor {
     }
     pub fn apply(&mut self, action: Action, options: &LaunchOptions) {
         let before = self.library.clone();
+        let selected_world_id = self
+            .library
+            .worlds
+            .get(self.world_tools.world)
+            .map(|w| w.id);
+        let selected_tile_id = self.library.tiles.get(self.world_tools.tile).map(|t| t.id);
         let record = !matches!(action, Action::Undo | Action::Redo | Action::Reload);
         self.notice = String::new();
         let result = self.perform(&action, options);
@@ -370,6 +466,22 @@ impl Editor {
             };
         }
         if matches!(action, Action::Reload) && self.notice == "Reopened saved library" {
+            if let Some(id) = selected_world_id {
+                self.world_tools.world = self
+                    .library
+                    .worlds
+                    .iter()
+                    .position(|w| w.id == id)
+                    .unwrap_or(0);
+            }
+            if let Some(id) = selected_tile_id {
+                self.world_tools.tile = self
+                    .library
+                    .tiles
+                    .iter()
+                    .position(|t| t.id == id)
+                    .unwrap_or(0);
+            }
             self.dirty = false;
         }
         self.clamp();
@@ -388,6 +500,7 @@ impl Editor {
     fn perform(&mut self, a: &Action, options: &LaunchOptions) -> Result<(), String> {
         let id = self.library.next_id();
         match *a {
+            Action::World(ref action) => crate::editor_world::action(self, action)?,
             Action::Animation(ref action) => self.animation_action(action)?,
             Action::UseWorkspace => {
                 self.workspace_ready = true;
@@ -433,7 +546,15 @@ impl Editor {
                 self.yaw = 0.45;
                 self.pitch = -0.12;
                 self.pan = Vec3::ZERO;
-                self.distance = if mode == Mode::Props { 6.5 } else { 5.0 };
+                self.distance = match mode {
+                    Mode::Tiles => 24.,
+                    Mode::Worlds => 175.,
+                    Mode::Props => 6.5,
+                    _ => 5.,
+                };
+                if matches!(mode, Mode::Tiles | Mode::Worlds) {
+                    self.pitch = 0.65;
+                }
                 self.vector = match mode {
                     Mode::Props => VectorField::AnchorPosition,
                     Mode::Characters => VectorField::AttachmentOffset,
@@ -462,7 +583,7 @@ impl Editor {
                     Mode::Characters => {
                         self.mode == Mode::Characters && self.character == document.index
                     }
-                    Mode::Menu => false,
+                    Mode::Tiles | Mode::Worlds | Mode::Menu => false,
                 };
                 if was_active {
                     if let Some(next) = self.open_documents.last().copied() {
@@ -923,12 +1044,24 @@ impl Editor {
                 a.scale = (a.scale + d).clamp(0.1, 4.);
             }
             Action::Orbit(d) => self.yaw += d,
-            Action::Zoom(d) => self.distance = (self.distance + d).clamp(2., 14.),
+            Action::Zoom(d) => {
+                self.distance = (self.distance + d).clamp(
+                    2.,
+                    if matches!(self.mode, Mode::Tiles | Mode::Worlds) {
+                        200.
+                    } else {
+                        14.
+                    },
+                )
+            }
             Action::Frame => {
                 self.yaw = 0.65;
                 self.pitch = -0.12;
                 self.pan = Vec3::ZERO;
-                self.distance = if self.mode == Mode::Props {
+                self.distance = if matches!(self.mode, Mode::Tiles | Mode::Worlds) {
+                    self.pitch = 0.65;
+                    crate::editor_world::frame_distance(self)
+                } else if self.mode == Mode::Props {
                     6.5
                 } else if let Some(body) = self.body() {
                     let mut min = [f32::INFINITY; 3];

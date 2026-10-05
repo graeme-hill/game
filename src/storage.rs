@@ -115,7 +115,7 @@ fn resource_paths(dir: &Path, paths: &mut Vec<PathBuf>) -> Result<(), String> {
             resource_paths(&path, paths)?;
         } else if matches!(
             path.extension().and_then(|value| value.to_str()),
-            Some("body" | "prop" | "character")
+            Some("body" | "prop" | "character" | "tile" | "world" | "sockets")
         ) {
             paths.push(path);
         }
@@ -161,6 +161,36 @@ pub fn save_workspace(dir: &Path, library: &Library) -> Result<(), String> {
         });
         write_resource(&path, "character", &character.name, character.id, character)?;
     }
+    for t in &library.tiles {
+        let path = existing_resource_path(dir, "tile", t.id).unwrap_or_else(|| {
+            dir.join("tiles")
+                .join(format!("{}.tile", safe_stem(&t.name, t.id)))
+        });
+        write_resource(&path, "tile", &t.name, t.id, t)?;
+    }
+    for w in &library.worlds {
+        let path = existing_resource_path(dir, "world", w.id).unwrap_or_else(|| {
+            dir.join("worlds")
+                .join(format!("{}.world", safe_stem(&w.name, w.id)))
+        });
+        write_resource(&path, "world", &w.name, w.id, w)?;
+    }
+    if !library.tiles.is_empty() {
+        let mut paths = vec![];
+        resource_paths(dir, &mut paths)?;
+        paths.sort();
+        let rules_path = paths
+            .into_iter()
+            .find(|p| p.extension().and_then(|e| e.to_str()) == Some("sockets"))
+            .unwrap_or_else(|| dir.join("connections.sockets"));
+        write_resource(
+            &rules_path,
+            "sockets",
+            "Connections",
+            0,
+            &library.socket_rules,
+        )?;
+    }
     save(&dir.join("library.json"), library)
 }
 
@@ -183,6 +213,7 @@ pub fn load_workspace(dir: &Path) -> Result<Library, String> {
         return load(&snapshot);
     }
     let mut library = Library::default();
+    let mut has_rules = false;
     for path in paths {
         let Some(ext) = path.extension().and_then(|value| value.to_str()) else {
             continue;
@@ -191,6 +222,19 @@ pub fn load_workspace(dir: &Path) -> Result<Library, String> {
             "body" => library.bodies.push(read_resource::<Body>(&path)?),
             "prop" => library.props.push(read_resource::<Prop>(&path)?),
             "character" => library.characters.push(read_resource::<Character>(&path)?),
+            "tile" => library
+                .tiles
+                .push(read_resource::<crate::tiles::Tile>(&path)?),
+            "world" => library
+                .worlds
+                .push(read_resource::<crate::tiles::World>(&path)?),
+            "sockets" => {
+                if has_rules {
+                    return Err("Multiple socket rule documents".into());
+                }
+                has_rules = true;
+                library.socket_rules = read_resource(&path)?;
+            }
             _ => {}
         }
     }

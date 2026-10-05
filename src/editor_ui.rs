@@ -32,10 +32,10 @@ fn text(s: impl Into<String>, size: f32) -> impl Bundle {
         ProUiText,
     )
 }
-fn item(p: &mut ChildSpawnerCommands, s: impl Into<String>) {
+pub(crate) fn item(p: &mut ChildSpawnerCommands, s: impl Into<String>) {
     p.spawn(text(s, 14.));
 }
-fn button(p: &mut ChildSpawnerCommands, label: &str, action: Action, width: f32) {
+pub(crate) fn button(p: &mut ChildSpawnerCommands, label: &str, action: Action, width: f32) {
     p.spawn((
         Button,
         Control {
@@ -54,7 +54,7 @@ fn button(p: &mut ChildSpawnerCommands, label: &str, action: Action, width: f32)
         children![text(label, 13.5)],
     ));
 }
-fn row(p: &mut ChildSpawnerCommands, items: Vec<(&str, Action, f32)>) {
+pub(crate) fn row(p: &mut ChildSpawnerCommands, items: Vec<(&str, Action, f32)>) {
     p.spawn(Node {
         column_gap: px(3),
         height: px(28),
@@ -102,7 +102,7 @@ fn vectors(p: &mut ChildSpawnerCommands, v: [f32; 3], rotation: bool) {
         });
     }
 }
-fn palette(p: &mut ChildSpawnerCommands, selected: usize) {
+pub(crate) fn palette(p: &mut ChildSpawnerCommands, selected: usize) {
     p.spawn(Node {
         height: px(24),
         column_gap: px(3),
@@ -251,6 +251,26 @@ fn workspace_explorer(root: &mut ChildSpawnerCommands, e: &Editor) {
                     198.,
                     e.mode == Mode::Characters && e.character == index,
                 );
+            }
+            if matches!(e.mode, Mode::Tiles | Mode::Worlds) {
+                for (index, t) in e.library.tiles.iter().enumerate() {
+                    tree_choice_button(
+                        files,
+                        &format!("◆ {}.tile", t.name),
+                        Action::World(crate::editor_world::WorldAction::OpenTile(index)),
+                        198.,
+                        e.mode == Mode::Tiles && e.world_tools.tile == index,
+                    );
+                }
+                for (index, w) in e.library.worlds.iter().enumerate() {
+                    tree_choice_button(
+                        files,
+                        &format!("◇ {}.world", w.name),
+                        Action::World(crate::editor_world::WorldAction::OpenWorld(index)),
+                        198.,
+                        e.mode == Mode::Worlds && e.world_tools.world == index,
+                    );
+                }
             }
             if e.library.bodies.is_empty()
                 && e.library.props.is_empty()
@@ -402,7 +422,16 @@ fn editor_tabs(root: &mut ChildSpawnerCommands, e: &Editor) {
         BackgroundColor(Color::srgb(0.030, 0.034, 0.040)),
     ))
     .with_children(|p| {
-        if e.open_documents.is_empty() {
+        if matches!(e.mode, Mode::Tiles | Mode::Worlds) {
+            item(
+                p,
+                if e.mode == Mode::Tiles {
+                    "TILE · editable voxel source"
+                } else {
+                    "WORLD · connected pieces"
+                },
+            );
+        } else if e.open_documents.is_empty() {
             item(p, "No editor open — select a resource in Explorer");
         }
         for document in &e.open_documents {
@@ -418,21 +447,21 @@ fn editor_tabs(root: &mut ChildSpawnerCommands, e: &Editor) {
                     .characters
                     .get(document.index)
                     .map(|v| v.name.as_str()),
-                Mode::Menu => None,
+                Mode::Tiles | Mode::Worlds | Mode::Menu => None,
             }
             .unwrap_or("missing");
             let action = match document.mode {
                 Mode::Bodies => Action::OpenBody(document.index),
                 Mode::Props => Action::OpenProp(document.index),
                 Mode::Characters => Action::OpenCharacter(document.index),
-                Mode::Menu => continue,
+                Mode::Tiles | Mode::Worlds | Mode::Menu => continue,
             };
             let active = e.mode == document.mode
                 && match document.mode {
                     Mode::Bodies => e.body == document.index,
                     Mode::Props => e.prop == document.index,
                     Mode::Characters => e.character == document.index,
-                    Mode::Menu => false,
+                    Mode::Tiles | Mode::Worlds | Mode::Menu => false,
                 };
             p.spawn(Node {
                 column_gap: px(1),
@@ -497,6 +526,8 @@ pub fn rebuild_ui(
                 button(p, "Undo", Action::Undo, 48.);
                 button(p, "Redo", Action::Redo, 48.);
                 button(p, "Reopen", Action::Reload, 66.);
+                button(p,"Tiles",Action::Navigate(Mode::Tiles),50.);
+                button(p,"Worlds",Action::Navigate(Mode::Worlds),60.);
             });
             if !e.workspace_ready {
                 root.spawn((Node { position_type: PositionType::Absolute, left: px(0), right: px(0), top: px(45), bottom: px(50), flex_direction: FlexDirection::Column, row_gap: px(18), align_items: AlignItems::Center, justify_content: JustifyContent::Center, ..default() }, children![text("OPEN A WORKSPACE", 29.), text("A workspace is a directory containing .body, .prop, and .character resources.", 15.)]))
@@ -569,7 +600,7 @@ pub fn rebuild_ui(
                 ))
                 .with_children(|p| {
                     p.spawn(text("INSPECTOR", 14.));
-                    if e.mode == Mode::Bodies {
+                    if matches!(e.mode,Mode::Tiles|Mode::Worlds) { crate::editor_world::panel(p,&e); } else if e.mode == Mode::Bodies {
                         body_workspace_sidebar(p, &e);
                     } else {
                         asset_header(p, &e);
@@ -1788,7 +1819,12 @@ pub fn snapshot(
     e: Res<Editor>,
     windows: Single<&Window>,
     options: Res<LaunchOptions>,
-    buttons: Query<(&Control, &ComputedNode, &UiGlobalTransform)>,
+    buttons: Query<(
+        &Control,
+        &ComputedNode,
+        &UiGlobalTransform,
+        Option<&CalculatedClip>,
+    )>,
     mut ticks: Local<u32>,
 ) {
     let Some(path) = &options.state_file else {
@@ -1798,11 +1834,14 @@ pub fn snapshot(
     if !(*ticks).is_multiple_of(5) {
         return;
     }
-    let controls:Vec<_>=buttons.iter().filter_map(|(c,node,t)|{
-        let center=t.translation;let size=node.size();if size.x<=0.||size.y<=0.{return None}
+    let controls:Vec<_>=buttons.iter().filter_map(|(c,node,t,clip)|{
+        let mut rect=Rect::from_center_size(t.translation,node.size());
+        if let Some(clip)=clip {rect=rect.intersect(clip.clip);}
+        rect=rect.intersect(Rect::from_corners(Vec2::ZERO,Vec2::new(windows.resolution.physical_width() as f32,windows.resolution.physical_height() as f32)));
+        let center=rect.center();let size=rect.size();if size.x<=0.||size.y<=0.{return None}
         Some(serde_json::json!({"label":c.label,"action":format!("{:?}",c.action),"center":[center.x,center.y],"size":[size.x,size.y]}))
     }).collect();
-    let state = serde_json::json!({"mode":format!("{:?}",e.mode),"revision":e.revision,"notice":e.notice,"naming":e.naming.as_ref().map(|(_,s)|s),"workspace":e.workspace_dir,"workspace_ready":e.workspace_ready,"open_documents":e.open_documents,"library":e.library,"body":e.body,"prop":e.prop,"character":e.character,"bone":e.bone,"mount":e.mount,"anchor":e.anchor,"attachment":e.attachment,"cursor":e.cursor,"brush":e.brush,"animation":{"enabled":e.animation.enabled,"selected":e.animation.selected,"time":e.animation.time,"playing":e.animation.playing,"blend":e.animation.blend,"blend_target":e.animation.blend_target},"dirty":e.dirty,"window":[windows.resolution.physical_width(),windows.resolution.physical_height()],"controls":controls});
+    let state = serde_json::json!({"mode":format!("{:?}",e.mode),"revision":e.revision,"notice":e.notice,"naming":e.naming.as_ref().map(|(_,s)|s),"workspace":e.workspace_dir,"workspace_ready":e.workspace_ready,"open_documents":e.open_documents,"library":e.library,"tile":e.world_tools.tile,"world":e.world_tools.world,"instance":e.world_tools.instance,"socket":e.world_tools.socket,"tile_rotation":e.world_tools.rotation,"body":e.body,"prop":e.prop,"character":e.character,"bone":e.bone,"mount":e.mount,"anchor":e.anchor,"attachment":e.attachment,"cursor":e.cursor,"brush":e.brush,"animation":{"enabled":e.animation.enabled,"selected":e.animation.selected,"time":e.animation.time,"playing":e.animation.playing,"blend":e.animation.blend,"blend_target":e.animation.blend_target},"dirty":e.dirty,"window":[windows.resolution.physical_width(),windows.resolution.physical_height()],"controls":controls});
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }

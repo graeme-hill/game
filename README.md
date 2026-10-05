@@ -41,14 +41,15 @@ flake files must be tracked for Nix to see them.
 Both modes use the same executable and workspace source files:
 
 ```sh
-nix develop --command cargo run --locked -- --mode game --workspace test_workspace
-nix develop --command cargo run --locked -- --mode editor --workspace test_workspace
+nix develop --command cargo run --locked
+nix develop --command cargo run --locked -- --mode editor
 ```
 
-With no arguments, the editor opens its workspace chooser. `--workspace DIR`
-opens a directory directly. Game mode requires this argument, recursively loads
-validated workspace resources, and spawns the first character in sorted file
-path order on a flat plane with a camera aimed at its body. The camera fits the
+With no arguments, `cargo run` launches game mode using `test_workspace`, just
+like `cargo run -- --mode game --workspace test_workspace`. Override `--mode`
+and/or `--workspace DIR` to select another mode or directory. Game mode recursively
+loads validated workspace resources and spawns the first character in sorted file
+path order in the first saved world (or on a flat plane for character-only workspaces). The camera fits the
 body again when the window resizes. Game mode reads the workspace without
 saving changes. Missing directories, missing characters, invalid references,
 and empty character bodies report an error and exit with code 1.
@@ -58,8 +59,7 @@ JSON source documents in the editor's existing format. The body has ten parts:
 head, torso, two upper/lower arms, and two upper/lower legs, with hierarchical
 elbows and knees and no hands. Open the same directory in editor mode to edit it.
 A legacy workspace containing only `library.json` also loads; its first character
-uses array order. The playground supports third-person movement and animation; world generation
-remains future work.
+uses array order. The sample also includes 18 voxel tiles and a generated neighbourhood with socket-connected roads, houses, entrance paths, and trees.
 
 Startup is split into launch configuration, an editor plugin, and a game plugin.
 Both modes share document loading and body/attachment rendering. Game placement
@@ -76,10 +76,12 @@ client area. Keep the baseline usable, then verify other sizes with
 
 ```sh
 export CARGO_HOME="$PWD/.cargo-cache"
-cargo run --locked
+cargo run --locked -- --mode editor
 ```
 
-On startup, choose a **workspace** directory. The left Explorer lists its
+The editor opens `test_workspace` by default. Use `--workspace DIR` to open
+another directory, or `--data-dir DIR` to start at the workspace chooser.
+The left Explorer lists its
 `.body`, `.prop`, and `.character` source resources; right-click the Explorer
 (or use **New ▾**) to create one. Selecting a resource opens its editor in a
 tab, so several resources can stay open while you switch among them. The
@@ -189,13 +191,94 @@ Movement is relative to the camera with acceleration, braking, and smooth facing
 The follow camera orbits, clamps pitch, and stays above the ground. Standing
 transitions to idle after a few seconds; movement blends standing/walk/run by
 speed, with walk/run sharing a stride phase. Missing animation clips fall back
-to available poses. Focus loss releases controls. This is a flat-ground
-playground with jumping and an arena boundary; terrain collision, obstacle
-camera avoidance, and jump-specific animations are future work.
+to available poses. Focus loss releases controls. Saved worlds use piece collision volumes, curb stepping, wall/ceiling collision,
+and camera obstruction checks. Character-only workspaces retain the flat-ground
+playground. Jump-specific animations remain future work.
 
 To add the same starter animations to another workspace with named humanoid
 bones, run `cargo run --locked --example animate_workspace -- WORKSPACE_DIR`.
 It saves the workspace and preserves existing clips with those names.
+
+## Tiles, sockets, and worlds
+
+`test_workspace/tiles/` contains **actual editable voxel source assets**: grass,
+house plots, straight/corner/T/crossing roads, straight/corner walkways, house
+floors, door/window/side walls, roof slopes/gables/ridges, and tree trunks,
+branches, and foliage. The saved neighbourhood is in `test_workspace/worlds/`.
+Roads are at Y=0; grass, sidewalks, entrance paths, and house floors are at Y=0.2.
+Plots reserve topsoil space for the house and entrance path, which fill that space
+when assembled. Door openings are clear; the starter kit has no animated doors.
+
+```sh
+nix develop --command cargo run --locked -- --mode editor --workspace test_workspace --editor-view tiles
+nix develop --command cargo run --locked -- --mode editor --workspace test_workspace --editor-view worlds
+nix develop --command cargo run --locked -- --mode game --workspace test_workspace
+```
+
+Use the **Tiles** and **Worlds** toolbar buttons or select their source resources
+in Explorer. Tiles support new/duplicate/rename, voxel paint/erase at an explicit
+voxel cursor, socket name/type/profile/position/facing/requirement editing, a **Rules** tab
+for custom many-to-many compatibility pairs, and collision-box
+authoring. **Frame all** fits the current asset. Socket guides show facing; the
+collision tool shows boxes. Source documents also expose profiles and arbitrary
+allowed orientation quaternions. Cursor steps are 0.1 world units.
+
+Worlds support selecting a piece in the viewport or with Piece controls, selecting
+one of its sockets, choosing a tile and rotation, and **Place**. A green wireframe
+previews a valid placement. The first piece is placed at the origin. Subsequent
+pieces must connect to the selected free socket. All coincident sockets are
+checked and connected, and occupied volumes cannot intersect. **Remove**, Undo,
+Redo, Save, and Reopen work on the graph. Incomplete worlds can be saved as drafts;
+**Validate** and **Save & play** require a complete world. Play opens a separate
+game window. `--world ID` selects a particular saved world's numeric ID.
+
+World storage is a spatial graph of piece instances and socket connections,
+not a tile array. Standard 12.8-unit terrain footprints and quarter-turn rotations
+are conventions of this starter kit. Smaller house and tree pieces use the same
+system. Local socket positions lie on the voxel lattice; socket frames and allowed
+instance orientations use quaternions. Connection rules in `connections.sockets`
+are symmetric many-to-many type pairs, with exact profile and frame matching.
+Collision boxes remain separate from visual geometry; oriented occupancy checks
+also protect non-solid foliage. Meshing is chunked and cached across instances.
+
+**Generate new world** uses the selected seed, dimensions (5–11 cells per side),
+house count, and planting percentage. The starter generator builds a connected
+street-loop layout, selects compatible rotated terrain candidates from metadata
+with bounded backtracking, assembles single-storey houses, and connects each door
+to a sidewalk. Failed plot/orientation choices are discarded. Optional planting
+sockets grow bounded trunk/branch/foliage assemblies. It reports impossible
+requests rather than publishing partial worlds. This is a starter construction
+recipe; additional layout/tree/house recipes can use the same graph and checks.
+
+Every completed walkway component must connect exactly one door and one sidewalk,
+with no branches, dangling ends, or isolated loops. Unused sidewalk access sockets
+are valid and do not create paths. Required house/roof/tree sockets must terminate
+in compatible pieces. Explicit road exits are allowed only on world boundaries.
+Saved worlds also require a supported character spawn.
+
+To create the kit in a character workspace that has no tiles, or generate an
+additional world from an existing kit:
+
+```sh
+nix develop --command cargo run --locked --example generate_neighbourhood -- WORKSPACE
+# Existing kit: seed, width, depth, houses, planting percentage
+nix develop --command cargo run --locked --example generate_neighbourhood -- WORKSPACE 23 7 7 3 45
+```
+
+The generator saves versioned `.tile`, `.world`, and `.sockets` JSON documents;
+old character-only workspaces still load. Existing resource paths are preserved.
+`library.json` remains a compatibility snapshot. Source files are loaded in path
+order; stable asset IDs preserve graph references independently of that order.
+
+```sh
+nix develop --command python3 scripts/tiles_smoke.py
+nix develop --command python3 scripts/resize_smoke.py --editor-view worlds
+nix develop --command python3 scripts/resize_smoke.py --editor-view tiles
+```
+
+The tile scenario uses real controls to author voxels, sockets and collision,
+place rotated road pieces, generate/save/reopen a world, and walk from the road
+up the curb, along an entrance path, through a doorway, and into a blocking wall.
 
 ## Automated visual loop (Linux)
 
@@ -243,12 +326,13 @@ cargo run --locked -- --mode editor --workspace data --editor-view characters \
   --capture artifacts/character.png --capture-frame 120 --exit-after-capture
 ```
 
-- `--mode editor|game` chooses the entry point (default `editor`).
-- `--workspace DIR` selects the workspace directory and skips the chooser.
+- `--mode editor|game` chooses the entry point (default `game`).
+- `--workspace DIR` selects the workspace directory (default `test_workspace`) and skips the chooser.
 - `--editor-view bodies|props|characters` opens a creator directly. This replaces
   the old `--workspace bodies|props|characters` shortcut.
-- `--data-dir DIR` sets the editor fallback directory (default `data`); an explicit
-  `--workspace` takes precedence. Harnesses use isolated directories.
+- `--data-dir DIR` overrides the default workspace with a fallback directory; an explicit
+  `--workspace` takes precedence regardless of argument order. With `--mode editor`
+  and no editor view flags, this opens the workspace chooser. Harnesses use isolated directories.
 - F12 saves `screenshot-001.png`, etc., under `--output-dir DIR` (default
   `artifacts/manual`). Numbering restarts each process.
 - `--capture FILE.png --capture-frame N` requests an automatic renderer capture
@@ -280,6 +364,8 @@ isolated copy of `test_workspace` and real F12 input:
 
 ```sh
 nix develop --command python3 scripts/resize_smoke.py --mode game
+# Verify default mode and workspace using an isolated test_workspace copy:
+nix develop --command python3 scripts/resize_smoke.py --mode game --default-launch
 # Open the same sample in the character editor while resizing:
 nix develop --command python3 scripts/resize_smoke.py --editor-view characters
 ```

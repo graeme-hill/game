@@ -1,0 +1,120 @@
+{
+  "version": 1,
+  "resource": {
+    "id": 27,
+    "name": "Tree trunk",
+    "category": "tree",
+    "voxels": [
+      {
+        "min": [
+          -3,
+          0,
+          -3
+        ],
+        "max": [
+          3,
+          16,
+          3
+        ],
+        "color": [
+          0.35,
+          0.23,
+          0.13
+        ]
+      }
+    ],
+    "sockets": [
+      {
+        "name": "base",
+        "kind": "trunk-base",
+        "position": [
+          0,
+          0,
+          0
+        ],
+        "rotation": [
+          3.090862e-8,
+          0.70710677,
+          -0.70710677,
+          -3.090862e-8
+        ],
+        "profile": "tree",
+        "required": true
+      },
+      {
+        "name": "top",
+        "kind": "trunk-top",
+        "position": [
+          0,
+          16,
+          0
+        ],
+        "rotation": [
+          -0.70710677,
+          0.0,
+          0.0,
+          0.70710677
+        ],
+        "profile": "tree",
+        "required": true
+      },
+      {
+        "name": "branch",
+        "kind": "branch-mount",
+        "position": [
+          3,
+          12,
+          0
+        ],
+        "rotation": [
+          0.0,
+          0.70710677,
+          0.0,
+          0.70710677
+        ],
+        "profile": "branch",
+        "required": false
+      }
+    ],
+    "rotations": [
+      [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      [
+        0.0,
+        0.70710677,
+        0.0,
+        0.70710677
+      ],
+      [
+        0.0,
+        1.0,
+        0.0,
+        -4.371139e-8
+      ],
+      [
+        0.0,
+        0.70710677,
+        0.0,
+        -0.70710677
+      ]
+    ],
+    "colliders": [
+      {
+        "min": [
+          -0.3,
+          0.0,
+          -0.3
+        ],
+        "max": [
+          0.3,
+          1.6,
+          0.3
+        ]
+      }
+    ]
+  }
+}

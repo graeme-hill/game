@@ -13,6 +13,12 @@ pub struct Library {
     pub bodies: Vec<Body>,
     pub props: Vec<Prop>,
     pub characters: Vec<Character>,
+    #[serde(default)]
+    pub tiles: Vec<crate::tiles::Tile>,
+    #[serde(default)]
+    pub worlds: Vec<crate::tiles::World>,
+    #[serde(default)]
+    pub socket_rules: crate::tiles::SocketRules,
 }
 impl Default for Library {
     fn default() -> Self {
@@ -21,6 +27,9 @@ impl Default for Library {
             bodies: vec![],
             props: vec![],
             characters: vec![],
+            tiles: vec![],
+            worlds: vec![],
+            socket_rules: Default::default(),
         }
     }
 }
@@ -200,6 +209,8 @@ impl Library {
             ids.push(c.id);
             ids.extend(c.attachments.iter().map(|a| a.id));
         }
+        ids.extend(self.tiles.iter().map(|t| t.id));
+        ids.extend(self.worlds.iter().map(|w| w.id));
         ids
     }
     pub fn next_id(&self) -> u32 {
@@ -208,6 +219,10 @@ impl Library {
     pub fn validate(&self) -> Result<(), String> {
         if self.version != 1 {
             return Err(format!("Unsupported library version {}", self.version));
+        }
+        crate::tiles::validate_tiles(&self.tiles, &self.socket_rules)?;
+        for world in &self.worlds {
+            crate::tiles::validate_world(world, &self.tiles, &self.socket_rules, false)?;
         }
         let mut ids = HashSet::new();
         for id in self.ids() {

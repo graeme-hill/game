@@ -38,6 +38,7 @@ impl Session {
         ));
         fs::create_dir_all(&directory).unwrap();
         let options = LaunchOptions {
+            workspace: None,
             data_dir: directory.clone(),
             ..Default::default()
         };

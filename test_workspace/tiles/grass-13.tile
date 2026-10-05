@@ -1,0 +1,200 @@
+{
+  "version": 1,
+  "resource": {
+    "id": 13,
+    "name": "Grass",
+    "category": "terrain",
+    "voxels": [
+      {
+        "min": [
+          -64,
+          -4,
+          -64
+        ],
+        "max": [
+          64,
+          0,
+          64
+        ],
+        "color": [
+          0.3,
+          0.53,
+          0.22
+        ]
+      },
+      {
+        "min": [
+          -64,
+          0,
+          -64
+        ],
+        "max": [
+          64,
+          2,
+          64
+        ],
+        "color": [
+          0.3,
+          0.53,
+          0.22
+        ]
+      }
+    ],
+    "sockets": [
+      {
+        "name": "plant-0",
+        "kind": "plant",
+        "position": [
+          -40,
+          2,
+          -40
+        ],
+        "rotation": [
+          -0.70710677,
+          0.0,
+          0.0,
+          0.70710677
+        ],
+        "profile": "tree",
+        "required": false
+      },
+      {
+        "name": "plant-1",
+        "kind": "plant",
+        "position": [
+          40,
+          2,
+          40
+        ],
+        "rotation": [
+          -0.70710677,
+          0.0,
+          0.0,
+          0.70710677
+        ],
+        "profile": "tree",
+        "required": false
+      },
+      {
+        "name": "edge-0",
+        "kind": "land",
+        "position": [
+          0,
+          -2,
+          -64
+        ],
+        "rotation": [
+          0.0,
+          1.0,
+          0.0,
+          -4.371139e-8
+        ],
+        "profile": "land-128",
+        "required": false
+      },
+      {
+        "name": "edge-1",
+        "kind": "land",
+        "position": [
+          64,
+          -2,
+          0
+        ],
+        "rotation": [
+          0.0,
+          0.70710677,
+          0.0,
+          0.70710677
+        ],
+        "profile": "land-128",
+        "required": false
+      },
+      {
+        "name": "edge-2",
+        "kind": "land",
+        "position": [
+          0,
+          -2,
+          64
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "profile": "land-128",
+        "required": false
+      },
+      {
+        "name": "edge-3",
+        "kind": "land",
+        "position": [
+          -64,
+          -2,
+          0
+        ],
+        "rotation": [
+          0.0,
+          0.70710677,
+          0.0,
+          -0.70710677
+        ],
+        "profile": "land-128",
+        "required": false
+      }
+    ],
+    "rotations": [
+      [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      [
+        0.0,
+        0.70710677,
+        0.0,
+        0.70710677
+      ],
+      [
+        0.0,
+        1.0,
+        0.0,
+        -4.371139e-8
+      ],
+      [
+        0.0,
+        0.70710677,
+        0.0,
+        -0.70710677
+      ]
+    ],
+    "colliders": [
+      {
+        "min": [
+          -6.4,
+          -0.4,
+          -6.4
+        ],
+        "max": [
+          6.4,
+          0.0,
+          6.4
+        ]
+      },
+      {
+        "min": [
+          -6.4,
+          0.0,
+          -6.4
+        ],
+        "max": [
+          6.4,
+          0.2,
+          6.4
+        ]
+      }
+    ]
+  }
+}

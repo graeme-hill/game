@@ -3,7 +3,9 @@
 Follow `spec.md`: Rust, Bevy, source-defined scenes, and decoupled ECS systems.
 The current application implements V1 body, voxel prop, and character creators.
 See `v1-plan.md` for the creator milestone. Character animations and a third-person
-playground are implemented; world generation is not. Run `scripts/motion_smoke.py`
+playground, socket-connected voxel tiles, and seeded neighbourhood generation are implemented.
+Run `scripts/tiles_smoke.py` for tile/world editing and terrain collision coverage.
+Run `scripts/motion_smoke.py`
 for animation editing and keyboard/mouse gameplay interaction coverage.
 See `README.md` for `--mode editor|game --workspace DIR`.
 

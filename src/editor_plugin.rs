@@ -17,6 +17,7 @@ impl Plugin for EditorPlugin {
                     editor_ui::scroll_body_panes,
                     editor_scene::paint_viewport,
                     editor_scene::select_bone_viewport,
+                    crate::editor_world::pick,
                     editor_scene::camera,
                     editor_scene::rebuild,
                     editor_ui::rebuild_ui,
@@ -24,7 +25,7 @@ impl Plugin for EditorPlugin {
                 )
                     .chain(),
             )
-            .add_systems(Update, editor_scene::guides)
+            .add_systems(Update, (editor_scene::guides, crate::editor_world::guides))
             .add_systems(
                 Update,
                 editor_ui::apply_pro_ui_font.after(editor_ui::rebuild_ui),

@@ -93,6 +93,7 @@ pub fn rebuild(
     }
     let entities = match e.mode {
         Mode::Menu => vec![],
+        Mode::Tiles | Mode::Worlds => crate::editor_world::render(&e, &mut renderer),
         Mode::Props => e
             .prop()
             .and_then(|prop| renderer.prop(prop, Transform::default()))
@@ -112,6 +113,10 @@ pub fn rebuild(
     }
 }
 fn target(e: &Editor) -> Vec3 {
+    if matches!(e.mode, Mode::Tiles | Mode::Worlds) {
+        let (a, b) = crate::editor_world::preview_bounds(e);
+        return (a + b) * 0.5;
+    }
     if e.mode == Mode::Props {
         return Vec3::new(1.6, 0.7, 1.6);
     }
@@ -180,13 +185,30 @@ pub fn camera_input(
             e.changed();
         }
         if scroll != 0. {
-            e.distance = (e.distance - scroll * 0.3).clamp(2., 14.);
+            e.distance = (e.distance
+                - scroll
+                    * if matches!(e.mode, Mode::Tiles | Mode::Worlds) {
+                        2.
+                    } else {
+                        0.3
+                    })
+            .clamp(
+                2.,
+                if matches!(e.mode, Mode::Tiles | Mode::Worlds) {
+                    200.
+                } else {
+                    14.
+                },
+            );
             e.changed();
         }
     }
 }
 pub fn guides(e: Res<Editor>, mut g: Gizmos, mut overlay: Gizmos<OverlayGuides>) {
-    if e.mode == Mode::Menu || !e.guides || (e.mode == Mode::Characters && e.animation.enabled) {
+    if matches!(e.mode, Mode::Tiles | Mode::Worlds | Mode::Menu)
+        || !e.guides
+        || (e.mode == Mode::Characters && e.animation.enabled)
+    {
         return;
     }
     let grid = Color::srgb(0.20, 0.22, 0.24);
@@ -329,7 +351,7 @@ pub fn select_bone_viewport(
     options: Res<LaunchOptions>,
 ) {
     if !mouse.just_pressed(MouseButton::Left)
-        || e.mode == Mode::Menu
+        || matches!(e.mode, Mode::Menu | Mode::Tiles | Mode::Worlds)
         || e.naming.is_some()
         || e.mode == Mode::Props
         || (e.mode == Mode::Characters && e.animation.enabled)

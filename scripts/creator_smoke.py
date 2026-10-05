@@ -34,7 +34,7 @@ class Session:
         self.capture_number = 0
         self.prefix = prefix
         ready_capture = output / f"{prefix}-ready.png"
-        command = [str(ROOT / "target/debug/game"), "--data-dir", str(data),
+        command = [str(ROOT / "target/debug/game"), "--mode", "editor", "--data-dir", str(data),
                    "--state-file", str(self.state_path), "--output-dir", str(output),
                    "--capture", str(ready_capture), "--capture-frame", "120"]
         if workspace:
@@ -171,7 +171,7 @@ class Session:
                 assert abs(target[axis] - current) >= step, (target, self.state()["cursor"], step)
                 self.action(f"Cursor({axis}, {1 if target[axis] > current else -1})")
 
-    def capture(self, name):
+    def capture(self, name, neutral=False):
         self.xdo("mousemove", "--sync", "--window", self.window, 638, 478)
         time.sleep(0.8)
         self.capture_number += 1
@@ -199,7 +199,8 @@ class Session:
             if name != "menu":
                 preview = rendered.convert("RGB").crop((235, 70, 990, 660))
                 colored = sum(1 for r, g, b in preview.get_flattened_data()
-                              if max(r, g, b) - min(r, g, b) > 40 and max(r, g, b) > 80)
+                              if ((max(r, g, b) > 70 and min(r, g, b) > 20) if neutral else
+                                  (max(r, g, b) - min(r, g, b) > 40 and max(r, g, b) > 80)))
                 assert colored > 1000, f"No visible asset in {name}"
         assert difference < 8, f"Rendered image differs from actual window: {difference}"
         (self.output / f"{name}-state.json").write_text(json.dumps(self.state(), indent=2) + "\n")
@@ -366,13 +367,18 @@ def main():
         try:
             if not select.select([read_fd], [], [], 15)[0]:
                 raise RuntimeError("Xvfb did not start")
-            display = os.read(read_fd, 64).decode().strip()
+            display_bytes = bytearray()
+            while not display_bytes.endswith(b"\n"):
+                part = os.read(read_fd, 1)
+                if not part: raise RuntimeError("Xvfb closed display pipe")
+                display_bytes.extend(part)
+            display = display_bytes.decode().strip()
             assert display.isdigit(), display
             env["DISPLAY"] = ":" + display
         finally:
             os.close(read_fd)
         session = Session(env, output, data, report)
-        assert session.state()["library"] == {"version": 1, "bodies": [], "props": [], "characters": []}
+        assert session.state()["library"] == {"version": 1, "bodies": [], "props": [], "characters": [], "tiles": [], "worlds": [], "socket_rules": {"pairs": []}}
         session.action("ShowWorkspacePicker")
         session.action(next(control["action"] for control in session.state()["controls"]
                             if control["action"].startswith("SelectWorkspace(")))
@@ -389,7 +395,7 @@ def main():
         session.capture("character-reopened")
         stop(session.process)
         with (output / "direct.log").open("w") as log:
-            subprocess.run([str(ROOT / "target/debug/game"), "--editor-view", "characters", "--data-dir", str(data),
+            subprocess.run([str(ROOT / "target/debug/game"), "--mode", "editor", "--editor-view", "characters", "--data-dir", str(data),
                             "--capture", str(output / "character-direct.png"), "--capture-frame", "60", "--exit-after-capture"],
                            cwd=ROOT, env=env, stdout=log, stderr=subprocess.STDOUT, timeout=120, check=True)
         for path in output.glob("*.png"):
@@ -400,7 +406,7 @@ def main():
             assert "ERROR" not in log and "panicked at" not in log, f"Inspect {name}"
             assert "capture_saved" in log, name
         with (output / "expected-capture-failure.log").open("w") as log:
-            failure = subprocess.run([str(ROOT / "target/debug/game"), "--editor-view", "characters", "--data-dir", str(data),
+            failure = subprocess.run([str(ROOT / "target/debug/game"), "--mode", "editor", "--editor-view", "characters", "--data-dir", str(data),
                                       "--capture", str(output / "invalid.unsupported"), "--capture-frame", "30", "--exit-after-capture"],
                                      cwd=ROOT, env=env, stdout=log, stderr=subprocess.STDOUT, timeout=120)
         assert failure.returncode == 1, f"Capture failure exit code: {failure.returncode}"
