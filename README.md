@@ -58,6 +58,16 @@ and empty character bodies report an error and exit with code 1.
 JSON source documents in the editor's existing format. The body has ten parts:
 head, torso, two upper/lower arms, and two upper/lower legs, with hierarchical
 elbows and knees and no hands. Open the same directory in editor mode to edit it.
+Its rest-pose surface height is 1.565 units (half the original 3.13), with all
+bone radii preserved. The compact armature places shoulders beside the chest,
+hips beneath it, and knees in front of the hip-to-foot line when bent.
+The shorter character wears a
+seed-speckled **Strawberry beret** and a winged **Bumblebee backpack**, stored as
+editable `.prop` files in `test_workspace/props/`. The character document binds
+their anchors to the head's **Crown** mount and torso's **Back** mount. The same
+recursive, validated workspace loader resolves these stable IDs in both modes;
+no special sample-only spawning code is needed. `library.json` mirrors the assets
+for legacy loading.
 A legacy workspace containing only `library.json` also loads; its first character
 uses array order. The sample also includes 18 voxel tiles and a generated neighbourhood with socket-connected roads, houses, entrance paths, and trees.
 
@@ -65,6 +75,10 @@ Startup is split into launch configuration, an editor plugin, and a game plugin.
 Both modes share document loading and body/attachment rendering. Game placement
 translates the SDF primitives and prop transforms together and grounds the body
 using its animated surface bounds.
+The mounted-prop ECS system follows each bone's animated position and rotation,
+including character movement and turning, and removes props when their character
+is removed. This logical parenting avoids inheriting the SDF bounding proxy's
+changing scale.
 
 ## V1 creators
 
@@ -164,8 +178,20 @@ Save, and Reopen work with animation edits.
 **Add locomotion** creates missing `standing`, `idle`, `walking`, and `running`
 clips for humanoid bones named Torso, Head, Left/Right upper/lower arm/leg.
 The sample already contains all four. Standing has subtle breathing; idle adds
-sway and head movement; walking/running use opposing limbs and bent joints.
+sway and head movement. Walking/running are baked from contact, compression,
+passing, and recovery poses, with forward knee bends, backward heel recovery,
+opposing arm swings, relaxed elbows and a level head. Running has a flight phase.
 These are ordinary editable keyframes, not runtime procedural animation.
+
+Generated clips include optional `stride_distance` metadata (zero for standing
+and idle). Their root keys are authored relative to the rest-pose ground plane;
+playback preserves that vertical motion and advances stride phase by distance
+travelled. For these gaits, movement speed scales with body height, so the short
+sample walks at 1.3 units/s and runs at 3.25 instead of sliding at the old tall
+body's speed. Legacy clips without this metadata keep their existing playback.
+After changing proportions, regenerate the four starter clips explicitly with
+`cargo run --locked --example animate_workspace -- WORKSPACE --replace-locomotion`.
+Other named clips and equipped props are preserved.
 
 Each `.character` has an optional `animations` array. Clips store a unique name,
 duration in seconds, loop flag, and sparse tracks keyed by body bone ID. Keys

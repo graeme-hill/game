@@ -128,6 +128,7 @@ impl Editor {
                         duration: 1.,
                         looping: true,
                         tracks: vec![],
+                        stride_distance: None,
                     }
                 };
                 let base = clip.name.clone();

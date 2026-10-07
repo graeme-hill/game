@@ -25,6 +25,9 @@ pub struct PlayerController {
     pub still_time: f32,
     /// standing, idle, walking, running
     pub weights: [f32; 4],
+    /// Body-relative travel speed and authored distances for walk/run cycles.
+    pub locomotion_scale: f32,
+    pub stride_distances: [Option<f32>; 2],
 }
 impl Default for PlayerController {
     fn default() -> Self {
@@ -37,6 +40,8 @@ impl Default for PlayerController {
             phase: 0.,
             still_time: 0.,
             weights: [1., 0., 0., 0.],
+            locomotion_scale: 1.,
+            stride_distances: [None; 2],
         }
     }
 }
@@ -84,7 +89,7 @@ pub fn locomotion_weights(speed: f32, still_time: f32) -> [f32; 4] {
 }
 pub fn step_player(player: &mut PlayerController, input: &PlayerInput, yaw: f32, dt: f32) {
     let dt = dt.clamp(0., 0.05);
-    let desired = camera_relative(input.movement, yaw) * input.speed;
+    let desired = camera_relative(input.movement, yaw) * input.speed * player.locomotion_scale;
     // Finite acceleration with stronger braking makes release predictable.
     let delta = desired - player.velocity;
     player.velocity += delta.clamp_length_max(if desired.length_squared() < 0.01 {
@@ -121,18 +126,40 @@ pub fn step_player(player: &mut PlayerController, input: &PlayerInput, yaw: f32,
     } else {
         0.
     };
-    let desired_weights = locomotion_weights(speed, player.still_time);
+    let desired_weights = locomotion_weights(speed / player.locomotion_scale, player.still_time);
     for (current, next) in player.weights.iter_mut().zip(desired_weights) {
         *current += (next - *current) * (1. - (-12. * dt).exp());
     }
     // Shared stride phase prevents foot phase jumps when walk/run weights change.
-    let cadence = player.weights[2] / 1.0 + player.weights[3] / 0.65;
+    let cadence = player.weights[2] * player.stride_distances[0].map_or(1., |d| speed / d)
+        + player.weights[3] * player.stride_distances[1].map_or(1. / 0.65, |d| speed / d);
     player.phase = (player.phase + dt * cadence).rem_euclid(1.);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn authored_stride_tracks_distance_at_body_relative_speed() {
+        let mut player = PlayerController {
+            locomotion_scale: 0.5,
+            stride_distances: [Some(1.), Some(1.5)],
+            velocity: Vec3::NEG_Z * WALK_SPEED * 0.5,
+            weights: [0., 0., 1., 0.],
+            ..default()
+        };
+        let input = PlayerInput {
+            movement: Vec2::Y,
+            speed: WALK_SPEED,
+            ..default()
+        };
+        for _ in 0..10 {
+            step_player(&mut player, &input, 0., 0.05);
+        }
+        assert!((player.position.z + 0.65).abs() < 0.00001);
+        assert!((player.phase - 0.65).abs() < 0.00001);
+        assert!(player.weights[2] > 0.999);
+    }
     #[test]
     fn analog_deadzone_blends_and_diagonal_speed() {
         assert_eq!(deadzone(Vec2::splat(0.05)), Vec2::ZERO);

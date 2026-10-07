@@ -7,7 +7,7 @@ use bevy::{
 };
 use game::{
     animation::{blend_clips, forward_kinematics, pose_bounds},
-    character_render::{CharacterRenderer, VisualPose},
+    character_render::{CharacterRenderer, CharacterVisuals, MountedProp, VisualPose},
     controller::*,
     model::Library,
     storage,
@@ -116,7 +116,7 @@ impl Plugin for GamePlugin {
             )
                 .chain(),
         )
-        .add_systems(PostUpdate, snapshot);
+        .add_systems(PostUpdate, snapshot.after(CharacterVisuals));
     }
 }
 fn spawn_character(
@@ -126,6 +126,14 @@ fn spawn_character(
 ) {
     let character = &session.library.characters[0];
     let parts = renderer.character(&session.library, character, session.position);
+    let stride_distances = ["walking", "running"].map(|name| {
+        character
+            .animations
+            .iter()
+            .find(|c| c.name.eq_ignore_ascii_case(name))
+            .and_then(|c| c.stride_distance)
+            .filter(|d| *d > 0.)
+    });
     for &entity in &parts {
         renderer.commands.entity(entity).insert(PlayerCharacter);
     }
@@ -135,6 +143,13 @@ fn spawn_character(
             .worlds
             .first()
             .map_or(Vec3::ZERO, |w| Vec3::from_array(w.spawn)),
+        facing: session.library.worlds.first().map_or(0., |w| w.spawn_yaw),
+        locomotion_scale: if stride_distances.iter().any(Option::is_some) {
+            (session.height / 3.13).clamp(0.25, 2.)
+        } else {
+            1.
+        },
+        stride_distances,
         ..default()
     });
     camera.target = session.center
@@ -383,10 +398,22 @@ fn animate_player(
         pose.locals = blend_clips(body, &clips);
         let frames = forward_kinematics(body, &pose.locals);
         let lower = pose_bounds(body, &frames).unwrap().0;
+        // Authored contact heights and running flight must survive playback.
+        // Legacy clips still use the original per-frame surface grounding.
+        let total_weight: f32 = clips.iter().map(|c| c.2).sum();
+        let authored_weight: f32 = clips
+            .iter()
+            .filter(|c| c.0.stride_distance.is_some())
+            .map(|c| c.2)
+            .sum();
+        let ground_y = (-lower.y).lerp(
+            session.position.y,
+            authored_weight / total_weight.max(0.0001),
+        );
         let rotation = Quat::from_rotation_y(player.facing);
         pose.world = Transform::from_translation(
             player.position
-                + rotation * Vec3::new(session.position.x, -lower.y, session.position.z),
+                + rotation * Vec3::new(session.position.x, ground_y, session.position.z),
         )
         .with_rotation(rotation);
     }
@@ -451,7 +478,7 @@ fn snapshot(
     window: Single<&Window>,
     player: Single<&PlayerController>,
     camera: Res<FollowCamera>,
-    parts: Query<Entity, With<PlayerCharacter>>,
+    parts: Query<(Option<&MountedProp>, &Transform), With<PlayerCharacter>>,
     mut ticks: Local<u32>,
 ) {
     let Some(path) = &options.state_file else {
@@ -461,8 +488,21 @@ fn snapshot(
     if !(*ticks).is_multiple_of(5) {
         return;
     }
+    let mounted: Vec<_> =
+        parts
+            .iter()
+            .filter_map(|(binding, transform)| {
+                binding.map(|binding| serde_json::json!({
+            "attachment": binding.attachment.id, "prop": binding.prop,
+            "translation": transform.translation.to_array(),
+            "rotation": transform.rotation.to_array(), "scale": transform.scale.to_array(),
+        }))
+            })
+            .collect();
     let json = serde_json::json!({"mode":"Game","window":[window.resolution.physical_width(),window.resolution.physical_height()],
         "world":session.library.worlds.first(),"collision_boxes":session.terrain.boxes.len(),"workspace":session.workspace,"character":session.library.characters[0],"spawned_parts":parts.iter().len(),
+        "mounted_props": mounted,
+        "walk_speed": WALK_SPEED * player.locomotion_scale, "run_speed": RUN_SPEED * player.locomotion_scale,
         "position":player.position.to_array(),"speed":player.velocity.length(),"facing":player.facing,"grounded":player.grounded,
         "phase":player.phase,"weights":player.weights,"camera_target":camera.target.to_array(),"camera_yaw":camera.yaw,
         "camera_pitch":camera.pitch,"camera_distance":camera.distance,"captured":camera.captured,"controls":[]});
@@ -507,6 +547,13 @@ mod tests {
             }
         }
         let (lower, upper) = body.bounds().unwrap();
+        assert!((upper.y - lower.y - 3.13 / 2.).abs() < 0.0001);
+        let radii = [0.16, 0.3, 0.085, 0.07, 0.1, 0.09, 0.085, 0.07, 0.1, 0.09];
+        for (bone, radius) in body.bones.iter().zip(radii) {
+            assert_eq!(bone.radius, radius);
+        }
+        assert_eq!(session.library.props.len(), 2);
+        assert_eq!(session.library.characters[0].attachments.len(), 2);
         assert!((lower.y + session.position.y).abs() < 0.0001);
         assert!(((lower + upper) * 0.5 + session.position - session.center).length() < 0.0001);
     }
@@ -535,6 +582,8 @@ mod tests {
             storage::load_workspace(&Path::new(env!("CARGO_MANIFEST_DIR")).join("test_workspace"))
                 .unwrap();
         library.bodies[0].bones.clear();
+        library.bodies[0].mounts.clear();
+        library.characters[0].attachments.clear();
         library.characters[0].animations.clear();
         storage::save_workspace(&directory, &library).unwrap();
         assert!(

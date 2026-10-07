@@ -101,7 +101,7 @@ def main():
                 return {}
 
         if args.mode == "game":
-            wait_for(lambda: state().get("spawned_parts") == 1, "spawned character", game)
+            wait_for(lambda: state().get("spawned_parts") == 3, "spawned character", game)
             assert state()["mode"] == "Game" and state()["character"]["name"] == "Stickman", state()
         else:
             wait_for(lambda: bool(state().get("controls")), "initial controls", game)
@@ -116,6 +116,8 @@ def main():
             subprocess.run(["xdotool", "windowsize", "--sync", window, str(width), str(height)], env=env, check=True)
             wait_for(lambda: state().get("window") == [width, height], f"state resize {width}x{height}", game)
             current = state()
+            if args.mode == "game":
+                assert len(current["mounted_props"]) == 2, "Equipment missing after resize"
             geometry = dict(line.split("=", 1) for line in subprocess.check_output(["xdotool", "getwindowgeometry", "--shell", window], env=env, text=True).splitlines())
             assert [int(geometry["WIDTH"]), int(geometry["HEIGHT"])] == [width, height], geometry
             for control in current["controls"]:

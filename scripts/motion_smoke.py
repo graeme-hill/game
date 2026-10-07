@@ -2,6 +2,7 @@
 """Exercise animation authoring and third-person controls with real window input."""
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import select
@@ -46,6 +47,38 @@ def main():
         s.action('Animation(Step(0.1))')
         s.action('Animation(Step(0.1))')
         s.capture('walking-editor')
+        # Review sagittal joint motion at fixed times, using the real orbit and
+        # timeline controls. A front/rear screenshot cannot reveal reversed knees.
+        for _ in range(6):
+            camera = s.state()['preview_camera']
+            dx = round((camera['yaw'] - math.pi / 2) / .01)
+            dy = round(camera['pitch'] / .01)
+            if abs(dx) <= 1 and abs(dy) <= 1:
+                break
+            s.xdo('mousemove', '--window', s.window, 700, 390)
+            time.sleep(.1)
+            s.xdo('mousedown', 3)
+            time.sleep(.1)
+            s.xdo('mousemove_relative', '--', max(-100, min(100, dx)), max(-60, min(60, dy)))
+            time.sleep(.2)
+            s.xdo('mouseup', 3)
+            time.sleep(.2)
+        assert abs(s.state()['preview_camera']['yaw'] - math.pi / 2) < .025
+        s.action('Zoom(-0.5)')
+        s.action('Zoom(-0.5)')
+        for index, name in [(2, 'walk'), (3, 'run')]:
+            s.action(f'Animation(Select({index}))')
+            s.action('Animation(Time(0.0))')
+            for pose in range(5):
+                if pose:
+                    s.action('Animation(Step(0.1))')
+                s.capture(f'side-{name}-{pose}')
+        s.action('Animation(Select(2))')
+        s.action('Animation(Time(0.0))')
+        s.action('Animation(Step(0.1))')
+        s.action('Animation(Step(0.1))')
+        s.action('Zoom(0.5)')
+        s.action('Zoom(0.5)')
         for _ in range(3):
             s.action(next(c['action'] for c in s.state()['controls'] if c['label'] == 'Blend with >'))
         for _ in range(5):
@@ -101,7 +134,10 @@ def main():
         session.action('Animation(Tools(true))')
         session.capture('animation-reopened')
         stop(session.process)
-        original = {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in data.iterdir() if p.is_file()}
+        def workspace_digest():
+            return {str(p.relative_to(data)): hashlib.sha256(p.read_bytes()).hexdigest()
+                    for p in data.rglob('*') if p.is_file()}
+        original = workspace_digest()
         state_path = output / 'play-state.json'
         with (output / 'play.log').open('w') as log:
             game = subprocess.Popen([str(ROOT/'target/debug/game'), '--mode', 'game', '--workspace', str(data),
@@ -114,7 +150,7 @@ def main():
         def wait(predicate, label):
             wait_for(lambda: predicate(state()), label, game, timeout=120)
             return state()
-        wait(lambda v: v.get('spawned_parts') == 1, 'play startup')
+        wait(lambda v: v.get('spawned_parts') == 3, 'play startup')
         wait_for(lambda: 'capture_saved' in (output/'play.log').read_text(), 'play warmup', game)
         def xdo(*args):
             return subprocess.check_output(['xdotool', *map(str,args)], env=env, text=True, timeout=10).strip()
@@ -125,8 +161,18 @@ def main():
         wait(lambda v:v.get('captured'), 'mouse capture')
         wait(lambda v:v['weights'][1] > .9, 'idle animation')
         captures = 0
+        def check_equipment():
+            current = state()
+            mounted = current['mounted_props']
+            attachments = current['character']['attachments']
+            assert len(mounted) == len(attachments) == 2
+            assert {p['prop'] for p in mounted} == {a['prop'] for a in attachments}
+            assert {p['attachment'] for p in mounted} == {a['id'] for a in attachments}
+            assert all(math.isfinite(v) for p in mounted for field in ('translation', 'rotation', 'scale') for v in p[field])
+            assert all(p['scale'][0] > 0 for p in mounted)
         def capture(name):
             nonlocal captures
+            check_equipment()
             captures += 1
             xdo('key','F12')
             path = output/'play'/f'screenshot-{captures:03}.png'
@@ -141,12 +187,36 @@ def main():
             shutil.copyfile(path,output/f'{name}.png')
             (output/f'{name}-state.json').write_text(json.dumps(state(),indent=2))
         capture('play-idle')
+        # Inspect both sides of the equipped sample using ordinary camera input.
+        xdo('click', '--repeat', 3, '--delay', 150, 4)
+        capture('equipment-back')
+        yaw = state()['camera_yaw']
+        for _ in range(40):
+            if math.cos(state()['camera_yaw'] - yaw) < -.97:
+                break
+            previous = state()['camera_yaw']
+            xdo('mousemove_relative', '--', 60, 0)
+            wait(lambda v: abs(v['camera_yaw'] - previous) > .05, 'equipment orbit step')
+        assert math.cos(state()['camera_yaw'] - yaw) < -.97, 'Camera did not reach the front'
+        capture('equipment-front')
+        # Camera-relative strafing presents an actual side-on travelling gait.
+        xdo('keydown', 'd')
+        wait(lambda v: v['weights'][2] > .95 and abs(math.cos(v['camera_yaw'] - v['facing'])) < .03, 'side walk')
+        capture('play-side-walking')
+        xdo('keydown', 'Shift_L')
+        wait(lambda v: v['weights'][3] > .95, 'side run')
+        capture('play-side-running')
+        xdo('keyup', 'd', 'Shift_L')
+        wait(lambda v: v['speed'] < .01, 'side gait braking')
+        xdo('key', 'r')
+        wait(lambda v: abs(v['camera_yaw'] - v['facing']) < .01, 'equipment recenter')
+        xdo('click', 5)
         start = state()['position']
         xdo('keydown','w')
-        wait(lambda v: v['speed'] > 2.5 and v['weights'][2] > .85, 'walking')
+        wait(lambda v: v['speed'] > v['walk_speed'] * .96 and v['weights'][2] > .85, 'walking')
         capture('play-walking')
         xdo('keydown','Shift_L')
-        wait(lambda v:v['speed'] > 6.4 and v['weights'][3] > .85,'running')
+        wait(lambda v:v['speed'] > v['run_speed'] * .96 and v['weights'][3] > .85,'running')
         capture('play-running')
         xdo('keyup','w','Shift_L')
         wait(lambda v:v['speed'] < .01,'braking')
@@ -170,11 +240,13 @@ def main():
         assert state()['position'] == before,'released controls moved player'
         xdo('click',1)
         wait(lambda v:v['captured'],'recapture')
-        assert original == {p.name:hashlib.sha256(p.read_bytes()).hexdigest() for p in data.iterdir() if p.is_file()}
+        assert original == workspace_digest(), 'Play changed workspace assets'
         for name in ['editor.log','reopened.log','play.log']:
             text = (output/name).read_text()
             assert 'ERROR' not in text and 'panicked at' not in text, name
         report.update(status='passed', gameplay=['idle','walk','run','jump','land','orbit','zoom','recenter','release','recapture'],
+                      gait=['side-view contact/down/passing/recovery previews', 'side-on keyboard walk/run'],
+                      equipment=['strawberry hat', 'bee backpack', 'back/front orbit', 'mounted during idle/walk/run/jump'],
                       gamepad='Synthetic Bevy input covered by Rust tests; no physical controller tested')
         print('PASS: animation authoring/save/restart and third-person keyboard/mouse controls.',flush=True)
     except Exception as error:
