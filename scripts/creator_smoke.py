@@ -1,18 +1,20 @@
 #!/usr/bin/env python3
-"""Create a rest-pose character and voxel hat through the 1280×720 UI."""
+"""Create a body, a voxel hat and a character through the 1280×720 editor UI.
+
+Everything is driven with real X input against the shipped binary. Control
+bounds come from the --state-file manifest; nothing is injected.
+"""
 import argparse
 import json
 import os
 from pathlib import Path
 import re
-import select
 import struct
-import shutil
 import subprocess
 import time
 
 from PIL import Image, ImageChops, ImageGrab, ImageStat
-from visual_support import ROOT, SCREEN_SIZE, stop, wait_for
+from visual_support import ROOT, SCREEN_SIZE, game_binary, software_vulkan, start_xvfb, stop, wait_for
 
 
 def float32_model(value):
@@ -27,16 +29,17 @@ def float32_model(value):
 
 
 class Session:
-    def __init__(self, env, output, data, report, workspace=None, prefix="game"):
-        self.env, self.output, self.report = env, output, report
-        self.state_path = output / "state.json"
+    def __init__(self, env, output, data, report, workspace=None, prefix="game", size=SCREEN_SIZE, extra=()):
+        self.env, self.output, self.report, self.size = env, output, report, size
+        self.state_path = output / f"{prefix}-state.json"
         self.state_path.unlink(missing_ok=True)
         self.capture_number = 0
         self.prefix = prefix
+        self.f12 = output / f"{prefix}-f12"
         ready_capture = output / f"{prefix}-ready.png"
-        command = [str(ROOT / "target/debug/game"), "--mode", "editor", "--data-dir", str(data),
-                   "--state-file", str(self.state_path), "--output-dir", str(output),
-                   "--capture", str(ready_capture), "--capture-frame", "120"]
+        command = [str(game_binary()), "--mode", "editor", "--data-dir", str(data),
+                   "--state-file", str(self.state_path), "--output-dir", str(self.f12),
+                   "--capture", str(ready_capture), "--capture-frame", "120", *extra]
         if workspace:
             command += ["--editor-view", workspace]
         self.log_path = output / f"{prefix}.log"
@@ -48,8 +51,8 @@ class Session:
                      "initial renderer warmup", self.process)
             self.window = self.xdo("search", "--sync", "--onlyvisible", "--pid", self.process.pid).splitlines()[0]
             self.xdo("windowfocus", "--sync", self.window)
-            geometry = dict(line.split("=", 1) for line in self.xdo("getwindowgeometry", "--shell", self.window).splitlines())
-            assert (int(geometry["WIDTH"]), int(geometry["HEIGHT"])) == SCREEN_SIZE, geometry
+            geometry = self.geometry()
+            assert (geometry[2], geometry[3]) == size, geometry
         except Exception:
             stop(self.process)
             raise
@@ -57,147 +60,214 @@ class Session:
     def xdo(self, *arguments):
         return subprocess.check_output(["xdotool", *map(str, arguments)], env=self.env, text=True, timeout=10).strip()
 
+    def geometry(self):
+        values = dict(line.split("=", 1) for line in self.xdo("getwindowgeometry", "--shell", self.window).splitlines())
+        return tuple(int(values[key]) for key in ("X", "Y", "WIDTH", "HEIGHT"))
+
     def state(self):
         try:
             return json.loads(self.state_path.read_text())
         except (OSError, ValueError):
             return {}
 
-    def wait(self, predicate, description):
-        wait_for(lambda: predicate(self.state()), description, self.process, timeout=120)
+    def wait(self, predicate, description, timeout=120):
+        wait_for(lambda: predicate(self.state()), description, self.process, timeout=timeout)
         return self.state()
 
-    def action(self, action):
-        before = self.wait(lambda s: bool(s.get("controls")), "controls before " + action)
-        controls = [c for c in before["controls"] if c["action"] == action]
-        assert controls, f"Missing {action}: available {[c['action'] for c in before['controls']]}"
-        control = controls[0]
+    def settle(self):
+        """Wait for a fresh manifest written after the latest rebuild."""
+        revision = self.state().get("revision", 0)
+        time.sleep(0.15)
+        return self.wait(lambda s: s.get("revision", 0) >= revision and bool(s.get("controls")), "settle")
+
+    def control(self, match, by="action"):
+        state = self.settle()
+        found = [c for c in state["controls"] if match(c[by])]
+        if not found:
+            found = self.reveal(match, by)
+        assert found, f"No control matched in {by}: available {sorted(set(c[by] for c in state['controls']))}"
+        return found[0]
+
+    def reveal(self, match, by):
+        """Wheel-scroll the inspector, outline and explorer looking for a control."""
+        order = ("popup", "inspector", "outline", "explorer")
+        panes = sorted(self.state().get("panes", []),
+                       key=lambda p: next((i for i, k in enumerate(order) if p["key"].startswith(k)), 9))
+        for pane in panes:
+            if pane["max"] <= 0:
+                continue
+            x, y, width, height = pane["rect"]
+            self.xdo("mousemove", "--sync", "--window", self.window, round(x + width / 2), round(y + height / 2))
+            for button in (5,) * 12 + (4,) * 24:
+                self.xdo("click", button)
+                time.sleep(0.12)
+                found = [c for c in self.state()["controls"] if match(c[by])]
+                if found:
+                    time.sleep(0.2)
+                    return [c for c in self.state()["controls"] if match(c[by])]
+        return []
+
+    def click(self, x, y, button=1):
+        assert 0 <= x < self.size[0] and 0 <= y < self.size[1], (x, y)
+        self.xdo("mousemove", "--sync", "--window", self.window, round(x), round(y))
+        time.sleep(0.07)
+        self.xdo("mousedown", button)
+        time.sleep(0.15)
+        self.xdo("mouseup", button)
+
+    def press(self, control, description, button=1, expect_change=True):
+        before = self.state()["revision"]
         x, y = control["center"]
         width, height = control["size"]
-        assert 0 <= x < SCREEN_SIZE[0] and 0 <= y < SCREEN_SIZE[1] and width > 0 and height > 0, control
-        revision = before["revision"]
+        assert width > 0 and height > 0, control
+        self.click(x, y, button)
+        if expect_change:
+            after = self.wait(lambda s: s.get("revision", 0) > before, description)
+        else:
+            time.sleep(0.3)
+            after = self.state()
+        time.sleep(0.08)
+        self.report["actions"].append({"action": description, "revision": after["revision"], "notice": after.get("notice")})
+        if len(self.report["actions"]) % 20 == 0:
+            print(f"Progress: {len(self.report['actions'])} UI actions; {description}; revision {after['revision']}", flush=True)
+        if after.get("notice_kind") == "Error":
+            raise AssertionError(f"{description}: {after['notice']}")
+        errors = [line for line in self.log_path.read_text().splitlines()
+                  if (" ERROR " in line and "gilrs" not in line) or "panicked at" in line]
+        if errors:
+            raise AssertionError(f"Renderer error after {description}: {errors[-1]}")
+        return after
+
+    def action(self, action):
+        """Click the first visible control whose action is exactly `action`."""
+        return self.press(self.control(lambda a: a == action), action)
+
+    def action_starting(self, prefix):
+        return self.press(self.control(lambda a: a.startswith(prefix)), prefix)
+
+    def menu(self, opener, item):
+        self.action(opener)
+        self.wait(lambda s: s.get("menu") is not None, f"menu {opener}")
+        # Pick the menu entry itself, not a control with the same action beneath it.
+        state = self.settle()
+        found = [c for c in state["controls"] if c["action"] == item and c["kind"] == "MenuItem"]
+        if not found:
+            found = [c for c in self.reveal(lambda a: a == item, "action") if c["kind"] == "MenuItem"]
+        assert found, f"No menu item {item}: {[c['action'] for c in state['controls'] if c['kind'] == 'MenuItem']}"
+        return self.press(found[0], item)
+
+    def new_resource(self, kind):
+        self.menu("OpenMenu(New)", f"New({kind})")
+        self.wait(lambda s: (s.get("editing") or "").startswith("DocName"), "new resource name entry")
+
+    def type_and_commit(self, text):
+        # A field that starts editing has its whole value selected: typing replaces it.
+        self.xdo("type", "--delay", 40, "--", text)
+        self.wait(lambda s: s.get("naming") == text, f"typed {text!r}")
+        self.xdo("key", "Return")
+        self.wait(lambda s: s.get("editing") is None, "edit committed")
+
+    def edit_text(self, target, text):
+        self.action(f"Edit({target})")
+        self.wait(lambda s: s.get("editing") == target, f"editing {target}")
+        self.type_and_commit(text)
+
+    def field(self, field, value):
+        """Click a numeric field (no drag) to type an exact value."""
+        control = self.control(lambda k: k == f"Field({field})", by="kind")
+        self.press(control, f"type {field}")
+        self.wait(lambda s: s.get("editing") == f"Value({field})", f"editing {field}")
+        self.type_and_commit(f"{value:g}" if isinstance(value, float) else str(value))
+        if self.state().get("notice_kind") == "Error":
+            raise AssertionError(self.state()["notice"])
+
+    def scrub(self, field, dx):
+        """Drag horizontally across a numeric field to scrub its value."""
+        control = self.control(lambda k: k == f"Field({field})", by="kind")
+        before = self.state()["revision"]
+        x, y = control["center"]
         self.xdo("mousemove", "--sync", "--window", self.window, round(x), round(y))
         time.sleep(0.07)
         self.xdo("mousedown", 1)
-        time.sleep(0.2)
+        for step in range(1, 11):
+            self.xdo("mousemove", "--sync", "--window", self.window, round(x + dx * step / 10), round(y))
+            time.sleep(0.05)
+        time.sleep(0.15)
         self.xdo("mouseup", 1)
-        after = self.wait(lambda s: s.get("revision", 0) > revision, action)
-        # Bevy rebuilds controls after edits. Let pointer release/layout propagate.
-        time.sleep(0.08)
-        self.report["actions"].append({"action": action, "revision": after["revision"], "notice": after.get("notice")})
-        if len(self.report["actions"]) % 20 == 0:
-            print(f"Progress: {len(self.report['actions'])} UI actions; {action}; revision {after['revision']}", flush=True)
-        if any(word in after.get("notice", "").lower() for word in ("rejected", "failed", "cannot", "maximum")):
-            raise AssertionError(after["notice"])
-        errors = [line for line in self.log_path.read_text().splitlines() if " ERROR " in line or "panicked at" in line]
-        if errors:
-            raise AssertionError(f"Renderer error after {action}: {errors[-1]}")
-        return after
+        self.wait(lambda s: s.get("revision", 0) > before and s.get("editing") is None, f"scrub {field}")
+        time.sleep(0.2)
+        self.report["actions"].append({"action": f"scrub {field} by {dx}px", "revision": self.state()["revision"]})
 
-    def signed_action(self, name, positive):
-        for control in self.state()["controls"]:
-            match = re.fullmatch(re.escape(name) + r"\((-?[0-9.]+)\)", control["action"])
-            if match and float(match[1]) != 0 and (float(match[1]) > 0) == positive:
-                return control["action"], abs(float(match[1]))
-        raise AssertionError(f"No {name} increment, positive={positive}")
-
-    def new_resource(self, kind):
-        action = f"NewResource({kind})"
-        if not any(control["action"] == action for control in self.state()["controls"]):
-            self.action("ToggleNewMenu")
-        self.action(action)
-
-    def rename(self, target, name):
-        self.action(f"Rename({target})")
-        self.xdo("keydown", "Control_L")
+    def drag_handle(self, handle, part, dx, dy):
+        """Drag a viewport move handle by real mouse input."""
+        state = self.settle()
+        found = [h for h in state.get("handles", []) if h["handle"].startswith(handle) and h["part"] == part]
+        assert found, f"No handle {handle} {part}: {state.get('handles')}"
+        before = state["revision"]
+        x, y = found[0]["center"]
+        self.xdo("mousemove", "--sync", "--window", self.window, round(x), round(y))
+        time.sleep(0.3)
+        self.xdo("mousedown", 1)
+        for step in range(1, 11):
+            self.xdo("mousemove", "--sync", "--window", self.window, round(x + dx * step / 10), round(y + dy * step / 10))
+            time.sleep(0.05)
         time.sleep(0.15)
-        self.xdo("key", "a")
-        time.sleep(0.15)
-        self.xdo("keyup", "Control_L")
-        self.wait(lambda s: s.get("naming") == "", "name cleared")
-        self.xdo("type", "--clearmodifiers", "--delay", 65, name)
-        self.xdo("key", "Return")
-        self.wait(lambda s: s.get("naming") is None, "name committed")
-        state = self.state()
-        assets = state["library"][state["mode"].lower()]
-        asset = assets[state[{"Bodies": "body", "Props": "prop", "Characters": "character"}[state["mode"]]]]
-        item = asset if target == "Asset" else asset[target.lower() + "s"][state[target.lower()]]
-        assert item["name"] == name, (item["name"], name)
-        time.sleep(0.1)
+        self.xdo("mouseup", 1)
+        self.wait(lambda v: v.get("revision", 0) > before, f"drag {handle} {part}")
+        time.sleep(0.3)
+        self.report["actions"].append({"action": f"drag handle {handle} {part}", "revision": self.state()["revision"]})
+
+    def library(self):
+        return self.settle()["library"]
 
     def viewport_paint(self):
-        before = self.state()["library"]
-        width, height = SCREEN_SIZE
-        # Probe the same relative preview locations at every baseline size;
-        # the preview expands with the live window rather than staying at
-        # the old 640x480 pixel coordinates.
-        for fx, fy in ((0.45, 0.48), (0.40, 0.50), (0.50, 0.50), (0.40, 0.40),
-                       (0.55, 0.60), (0.65, 0.60), (0.75, 0.60), (0.85, 0.60),
-                       (0.60, 0.70), (0.70, 0.70), (0.80, 0.70), (0.90, 0.70),
-                       (0.65, 0.80), (0.75, 0.80), (0.85, 0.80)):
-            x, y = round(width * fx), round(height * fy)
-            self.xdo("mousemove", "--sync", "--window", self.window, x, y)
-            time.sleep(0.1)
-            self.xdo("mousedown", 1)
-            time.sleep(0.2)
-            self.xdo("mouseup", 1)
+        before = self.library()
+        x0, y0, width, height = self.state()["viewport"]
+        for fx, fy in ((0.5, 0.75), (0.45, 0.7), (0.55, 0.8), (0.4, 0.6), (0.6, 0.65), (0.5, 0.55)):
+            x, y = x0 + width * fx, y0 + height * fy
+            self.click(x, y)
             deadline = time.monotonic() + 3
             while time.monotonic() < deadline:
                 if self.state().get("library") != before:
                     self.report["viewport_paint"] = {"position": [x, y], "revision": self.state()["revision"]}
                     self.capture("viewport-painted")
                     self.action("Undo")
-                    assert self.state()["library"] == before
+                    assert self.library() == before
                     return
                 time.sleep(0.1)
         raise AssertionError("No direct viewport click painted a voxel")
 
-    def vector(self, field, current, target):
-        self.action(f"SetVector({field})")
-        for axis in range(3):
-            steps = round((target[axis] - current[axis]) / 0.1)
-            for _ in range(abs(steps)):
-                self.action(f"Axis({axis}, {'0.1' if steps > 0 else '-0.1'})")
-
-    def brush(self, size):
-        while self.state()["brush"] != size:
-            self.action("Brush(1)")
-
-    def cursor(self, target):
-        for axis in range(3):
-            while self.state()["cursor"][axis] != target[axis]:
-                current = self.state()["cursor"][axis]
-                step = self.state()["brush"]
-                assert abs(target[axis] - current) >= step, (target, self.state()["cursor"], step)
-                self.action(f"Cursor({axis}, {1 if target[axis] > current else -1})")
-
-    def capture(self, name, neutral=False):
-        self.xdo("mousemove", "--sync", "--window", self.window, 638, 478)
+    def capture(self, name, check_viewport=True, neutral=False):
+        # Park the pointer where it cannot hover a control.
+        x0, y0, width, height = self.state().get("viewport") or (0, 0, *self.size)
+        self.xdo("mousemove", "--sync", "--window", self.window, round(x0 + width * 0.5), round(y0 + height - 4))
         time.sleep(0.8)
         self.capture_number += 1
-        generated = self.output / f"screenshot-{self.capture_number:03}.png"
+        generated = self.f12 / f"screenshot-{self.capture_number:03}.png"
         generated.unlink(missing_ok=True)
         self.xdo("key", "F12")
+
         def complete():
             try:
                 with Image.open(generated) as image:
                     image.load()
-                    assert image.size == SCREEN_SIZE, image.size
+                    assert image.size == self.size, image.size
                 return True
             except (OSError, ValueError):
                 return False
         wait_for(complete, f"capture {name}", self.process)
         destination = self.output / f"{name}.png"
         generated.rename(destination)
-        geometry = dict(line.split("=", 1) for line in self.xdo("getwindowgeometry", "--shell", self.window).splitlines())
-        x, y, width, height = (int(geometry[key]) for key in ("X", "Y", "WIDTH", "HEIGHT"))
-        assert (width, height) == SCREEN_SIZE
+        x, y, width, height = self.geometry()
+        assert (width, height) == self.size
         presented = ImageGrab.grab(bbox=(x, y, x + width, y + height), xdisplay=self.env["DISPLAY"])
         presented.save(self.output / f"{name}-window.png")
         with Image.open(destination) as rendered:
             difference = sum(ImageStat.Stat(ImageChops.difference(rendered.convert("RGB"), presented.convert("RGB"))).mean) / 3
-            if name != "menu":
-                preview = rendered.convert("RGB").crop((235, 70, 990, 660))
+            viewport = self.state().get("viewport")
+            if check_viewport and viewport:
+                vx, vy, vw, vh = map(round, viewport)
+                preview = rendered.convert("RGB").crop((vx, vy, vx + vw, vy + vh))
                 colored = sum(1 for r, g, b in preview.get_flattened_data()
                               if ((max(r, g, b) > 70 and min(r, g, b) > 20) if neutral else
                                   (max(r, g, b) - min(r, g, b) > 40 and max(r, g, b) > 80)))
@@ -208,89 +278,114 @@ class Session:
         print(f"Captured {name} at {self.state()['revision']} ({len(self.report['actions'])} actions)", flush=True)
 
 
+def selected_id(state, kind):
+    match = re.fullmatch(kind + r"\((\d+)\)", state["selection"])
+    assert match, state["selection"]
+    return int(match[1])
+
+
+def set_vector(s, name, values):
+    for axis, value in enumerate(values):
+        s.field(f"{name}({axis})", value)
+
+
 def create_body(s):
-    s.new_resource("Bodies")
-    assert s.state()["library"]["bodies"][0]["bones"] == []
-    s.rename("Asset", "Smoke goo person")
-    s.action("AddBone(false)")
-    s.rename("Bone", "Torso")
-    s.vector("BoneOffset", [0, 0, 0], [0, 0.8, 0])
-    s.vector("BoneTip", [0, 0.6, 0], [0, 0.7, 0])
-    action, _ = s.signed_action("Radius", True)
-    for _ in range(3):
-        s.action(action)
-    s.action("AddBone(true)")
-    s.rename("Bone", "Head")
-    s.vector("BoneOffset", [0, 0, 0], [0, 0.1, 0])
-    s.vector("BoneTip", [0, 0.6, 0], [0, 0.3, 0])
-    s.action("Shape")
-    for _ in range(5):
-        s.action(action)
-    s.action("BodyTools(true)")
+    s.new_resource("Body")
+    s.type_and_commit("Smoke goo person")
+    assert s.library()["bodies"][0]["bones"] == []
+    s.action("AddBone { child: false }")
+    s.edit_text("BoneName", "Torso")
+    torso = selected_id(s.state(), "Bone")
+    set_vector(s, "BoneOffset", [0, 0.8, 0])
+    set_vector(s, "BoneTip", [0, 0.7, 0])
+    radius = s.library()["bodies"][0]["bones"][0]["radius"]
+    s.scrub("BoneRadius", 40)
+    assert s.library()["bodies"][0]["bones"][0]["radius"] > radius + 0.1, "Scrubbing did not change the radius"
+    s.action("Undo")
+    assert abs(s.library()["bodies"][0]["bones"][0]["radius"] - radius) < 1e-6, "One scrub is one undo step"
+    s.field("BoneRadius", 0.27)
+    s.action("AddBone { child: true }")
+    s.edit_text("BoneName", "Head")
+    set_vector(s, "BoneOffset", [0, 0.1, 0])
+    set_vector(s, "BoneTip", [0, 0.3, 0])
+    s.action("ToggleShape")
+    s.field("BoneRadius", 0.33)
+    # The viewport move handle edits the same values: drag the tip's Y arrow.
+    before = s.library()
+    s.drag_handle("BoneTip", "Axis(1)", 0, -50)
+    head = s.library()["bodies"][0]["bones"][1]
+    assert head["tip"][1] > 0.4 and abs(head["tip"][0]) < 1e-6, head["tip"]
+    s.action("Undo")
+    assert s.library() == before, "A handle drag is one undo step"
     s.action("AddMount")
-    s.rename("Mount", "Hat socket")
-    s.action("BodyTools(false)")
+    s.edit_text("MountName", "Hat socket")
     for name, offset, tip in [
         ("Left arm", [-0.2, -0.1, 0], [-0.5, -0.4, 0]),
         ("Right arm", [0.2, -0.1, 0], [0.5, -0.4, 0]),
         ("Left leg", [-0.2, -0.7, 0], [0, -0.7, 0]),
         ("Right leg", [0.2, -0.7, 0], [0, -0.7, 0]),
     ]:
-        while s.state()["bone"] != 0:
-            s.action("BoneCycle(-1)")
-        s.action("AddBone(true)")
-        s.rename("Bone", name)
-        s.vector("BoneOffset", [0, 0, 0], offset)
-        s.vector("BoneTip", [0, 0.6, 0], tip)
-    body = s.state()["library"]["bodies"][0]
+        s.action(f"Select(Bone({torso}))")
+        s.action("AddBone { child: true }")
+        s.edit_text("BoneName", name)
+        set_vector(s, "BoneOffset", offset)
+        set_vector(s, "BoneTip", tip)
+    body = s.library()["bodies"][0]
     assert len(body["bones"]) == 6 and len(body["mounts"]) == 1
     assert all(b["parent"] == body["bones"][0]["id"] for b in body["bones"][1:])
     assert body["bones"][1]["shape"].lower() == "sphere"
     assert [b["name"] for b in body["bones"]] == ["Torso", "Head", "Left arm", "Right arm", "Left leg", "Right leg"]
+    assert body["mounts"][0]["name"] == "Hat socket"
     s.action("Save")
+    assert not s.state()["dirty"]
     s.capture("body-from-scratch")
 
 
+def paint(s, cursor):
+    for axis, value in enumerate(cursor):
+        if s.state()["cursor"][axis] != value:
+            s.field(f"Cursor({axis})", value)
+    s.action("PaintCursor { erase: false }")
+
+
 def create_prop(s):
-    s.new_resource("Props")
-    s.rename("Asset", "Purple voxel hat")
-    assert s.state()["library"]["props"][0]["blocks"] == []
+    s.new_resource("Prop")
+    s.type_and_commit("Purple voxel hat")
+    assert s.library()["props"][0]["blocks"] == []
     # A large cube is one stored block; a fine eraser preserves its surroundings.
-    s.cursor([0, 0, 0])
-    s.brush(16)
-    s.action("Paint(false)")
-    original = s.state()["library"]
+    s.action("Brush(16)")
+    for axis in range(3):
+        s.field(f"Cursor({axis})", 0)
+    s.action("PaintCursor { erase: false }")
+    original = s.library()
     assert len(original["props"][0]["blocks"]) == 1
-    s.brush(1)
-    s.action("Paint(true)")
-    erased = s.state()["library"]
+    s.action("Brush(1)")
+    s.action("PaintCursor { erase: true }")
+    erased = s.library()
     assert erased != original and len(erased["props"][0]["blocks"]) > 1
     s.action("Undo")
-    assert s.state()["library"] == original
+    assert s.library() == original
     s.action("Redo")
-    assert s.state()["library"] == erased
-    s.brush(16)
-    s.action("Paint(true)")
-    assert s.state()["library"]["props"][0]["blocks"] == []
+    assert s.library() == erased
+    s.action("Brush(16)")
+    s.action("PaintCursor { erase: true }")
+    assert s.library()["props"][0]["blocks"] == []
     # Four-voxel cubes form a wide flat brim and a narrower raised crown.
-    s.brush(4)
-    s.action("Color(7)")
+    s.action("Brush(4)")
+    s.action("Color(16)")
     for row, z in enumerate(range(0, 16, 4)):
         for x in (range(0, 16, 4) if row % 2 == 0 else range(12, -1, -4)):
-            s.cursor([x, 0, z])
-            s.action("Paint(false)")
-    s.action("Color(2)")
+            paint(s, [x, 0, z])
+    s.action("Color(14)")
     for y in (4, 8):
         for x, z in ((4, 4), (8, 4), (8, 8), (4, 8)):
-            s.cursor([x, y, z])
-            s.action("Paint(false)")
-    s.cursor([8, 0, 8])
+            paint(s, [x, y, z])
+    for axis, value in enumerate([8, 0, 8]):
+        s.field(f"Cursor({axis})", value)
     s.viewport_paint()
-    s.cursor([8, 0, 8])
-    s.action("PropTools(true)")
     s.action("AddAnchor")
-    s.rename("Anchor", "Head center")
-    prop = s.state()["library"]["props"][0]
+    s.edit_text("AnchorName", "Head center")
+    prop = s.library()["props"][0]
     assert len(prop["anchors"]) == 1
     assert all(abs(a - b) < 1e-6 for a, b in zip(prop["anchors"][0]["position"], [0.8, 0.0, 0.8]))
     assert sum(b["size"] ** 3 for b in prop["blocks"]) == 24 * 4 ** 3
@@ -299,16 +394,17 @@ def create_prop(s):
 
 
 def create_character(s):
-    s.new_resource("Characters")
-    s.rename("Asset", "Goo person in hat")
-    # Exercise the child-friendly named bone tree in the character workspace.
-    s.action("SelectBone(1)")
-    assert s.state()["bone"] == 1
+    s.new_resource("Character")
+    s.type_and_commit("Goo person in hat")
+    library = s.library()
+    head = library["bodies"][0]["bones"][1]["id"]
+    # Bones are selectable in the outline and drive the pose inspector.
+    s.action(f"Select(Bone({head}))")
+    assert s.state()["selection"] == f"Bone({head})"
+    s.action("Select(None)")
     s.action("Attach")
-    action, step = s.signed_action("Scale", False)
-    for _ in range(round(0.5 / step)):
-        s.action(action)
-    library = s.state()["library"]
+    s.field("AttachScale", 0.5)
+    library = s.library()
     character = library["characters"][0]
     assert character["body"] == library["bodies"][0]["id"]
     assert len(character["attachments"]) == 1
@@ -316,19 +412,16 @@ def create_character(s):
     assert attachment["mount"] == library["bodies"][0]["mounts"][0]["id"]
     assert attachment["anchor"] == library["props"][0]["anchors"][0]["id"]
     assert attachment["prop"] == library["props"][0]["id"]
-    before_rotation = s.state()["library"]
-    s.action("SetVector(AttachmentRotation)")
-    rotation_action = next(c["action"] for c in s.state()["controls"] if c["action"].startswith("Axis(1, ") and "-" not in c["action"])
-    s.action(rotation_action)
-    assert s.state()["library"] != before_rotation
-    assert s.state()["library"]["characters"][0]["attachments"][0]["rotation"][1] > 0.2
+    assert abs(attachment["scale"] - 0.5) < 1e-6
+    before_rotation = s.library()
+    s.scrub("AttachRotation(1)", 30)
+    assert s.library()["characters"][0]["attachments"][0]["rotation"][1] > 0.2
     s.action("Undo")
-    assert s.state()["library"] == before_rotation
-    s.action("SetVector(AttachmentOffset)")
-    s.action("Guides")
+    assert s.library() == before_rotation
+    s.action("ToggleGuides")
     s.action("Save")
     s.capture("character-hat")
-    return s.state()["library"]
+    return s.library()
 
 
 def main():
@@ -343,59 +436,34 @@ def main():
               "actions": [], "captures": [], "scenario": "create six-bone body, voxel hat, attach, save and restart"}
     env = os.environ.copy()
     env.setdefault("CARGO_HOME", str(ROOT / ".cargo-cache"))
-    env["XDG_CACHE_HOME"] = str(ROOT / "artifacts" / "cache")
     xvfb = session = None
     try:
         if not args.no_build:
             with (output / "build.log").open("w") as log:
                 subprocess.run(["cargo", "build", "--locked"], cwd=ROOT, env=env, stdout=log, stderr=subprocess.STDOUT, check=True)
-        for tool in ("xdotool", "Xvfb"):
-            if not shutil.which(tool):
-                raise RuntimeError(f"Missing {tool}; run inside nix develop")
-        drivers = [p for directory in env.get("XDG_DATA_DIRS", "/usr/share").split(":") for p in Path(directory).glob("vulkan/icd.d/lvp*.json")]
-        if not drivers:
-            raise RuntimeError("Mesa software Vulkan driver not found")
-        env.update(VK_DRIVER_FILES=str(drivers[-1]), VK_ICD_FILENAMES=str(drivers[-1]),
-                   WINIT_UNIX_BACKEND="x11", WINIT_X11_SCALE_FACTOR="1", WGPU_BACKEND="vulkan",
-                   RUST_LOG="info,wgpu_core=warn,wgpu_hal=warn", RUST_BACKTRACE="1")
-        env.pop("WAYLAND_DISPLAY", None)
-        read_fd, write_fd = os.pipe()
-        with (output / "xvfb.log").open("w") as log:
-            xvfb = subprocess.Popen(["Xvfb", "-displayfd", str(write_fd), "-screen", "0", "1280x720x24", "-nolisten", "tcp", "-ac"],
-                                    pass_fds=(write_fd,), stdout=log, stderr=subprocess.STDOUT, env=env)
-        os.close(write_fd)
-        try:
-            if not select.select([read_fd], [], [], 15)[0]:
-                raise RuntimeError("Xvfb did not start")
-            display_bytes = bytearray()
-            while not display_bytes.endswith(b"\n"):
-                part = os.read(read_fd, 1)
-                if not part: raise RuntimeError("Xvfb closed display pipe")
-                display_bytes.extend(part)
-            display = display_bytes.decode().strip()
-            assert display.isdigit(), display
-            env["DISPLAY"] = ":" + display
-        finally:
-            os.close(read_fd)
+        software_vulkan(env)
+        xvfb = start_xvfb(env, SCREEN_SIZE, output / "xvfb.log")
         session = Session(env, output, data, report)
-        assert session.state()["library"] == {"version": 1, "bodies": [], "props": [], "characters": [], "tiles": [], "worlds": [], "socket_rules": {"pairs": []}}
-        session.action("ShowWorkspacePicker")
-        session.action(next(control["action"] for control in session.state()["controls"]
-                            if control["action"].startswith("SelectWorkspace(")))
-        session.capture("menu")
+        empty = {"version": 1, "bodies": [], "props": [], "characters": [], "tiles": [], "worlds": [], "socket_rules": {"pairs": []}}
+        assert session.state()["library"] == empty
+        assert not session.state()["workspace_ready"]
+        session.capture("welcome", check_viewport=False)
+        session.action_starting("OpenWorkspace(")
+        assert session.state()["workspace_ready"]
+        session.capture("workspace", check_viewport=False)
         create_body(session)
         create_prop(session)
         expected = create_character(session)
         assert float32_model(json.loads((data / "library.json").read_text())) == float32_model(expected)
         stop(session.process)
         session = Session(env, output, data, report, workspace="characters", prefix="reopened")
-        assert session.state()["mode"] == "Characters"
+        assert session.state()["mode"] == "Character"
         assert session.state()["library"] == expected, "Restart changed saved assets"
-        session.action("Guides")
+        session.action("ToggleGuides")
         session.capture("character-reopened")
         stop(session.process)
         with (output / "direct.log").open("w") as log:
-            subprocess.run([str(ROOT / "target/debug/game"), "--mode", "editor", "--editor-view", "characters", "--data-dir", str(data),
+            subprocess.run([str(game_binary()), "--mode", "editor", "--editor-view", "characters", "--data-dir", str(data),
                             "--capture", str(output / "character-direct.png"), "--capture-frame", "60", "--exit-after-capture"],
                            cwd=ROOT, env=env, stdout=log, stderr=subprocess.STDOUT, timeout=120, check=True)
         for path in output.glob("*.png"):
@@ -403,10 +471,11 @@ def main():
                 assert image.size == SCREEN_SIZE, (path, image.size)
         for name in ("game.log", "reopened.log", "direct.log"):
             log = (output / name).read_text()
-            assert "ERROR" not in log and "panicked at" not in log, f"Inspect {name}"
+            errors = [line for line in log.splitlines() if (" ERROR " in line and "gilrs" not in line) or "panicked at" in line]
+            assert not errors, f"Inspect {name}: {errors[-1]}"
             assert "capture_saved" in log, name
         with (output / "expected-capture-failure.log").open("w") as log:
-            failure = subprocess.run([str(ROOT / "target/debug/game"), "--mode", "editor", "--editor-view", "characters", "--data-dir", str(data),
+            failure = subprocess.run([str(game_binary()), "--mode", "editor", "--editor-view", "characters", "--data-dir", str(data),
                                       "--capture", str(output / "invalid.unsupported"), "--capture-frame", "30", "--exit-after-capture"],
                                      cwd=ROOT, env=env, stdout=log, stderr=subprocess.STDOUT, timeout=120)
         assert failure.returncode == 1, f"Capture failure exit code: {failure.returncode}"

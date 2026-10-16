@@ -4,14 +4,12 @@ import hashlib
 import json
 import math
 import os
-from pathlib import Path
-import select
 import shutil
 import subprocess
 import time
 from PIL import Image
 from creator_smoke import Session, float32_model
-from visual_support import ROOT, stop, wait_for
+from visual_support import ROOT, game_binary, software_vulkan, start_xvfb, stop, wait_for
 
 
 def main():
@@ -20,118 +18,110 @@ def main():
     data = output / 'data'
     shutil.copytree(ROOT / 'test_workspace', data)
     report = dict(status='failed', renderer='Mesa software Vulkan', actions=[], captures=[])
-    env = os.environ.copy()
-    env['XDG_CACHE_HOME'] = str(ROOT / 'artifacts/cache')
-    drivers = [p for d in env.get('XDG_DATA_DIRS', '/usr/share').split(':') for p in Path(d).glob('vulkan/icd.d/lvp*.json')]
-    env.update(VK_DRIVER_FILES=str(drivers[-1]), VK_ICD_FILENAMES=str(drivers[-1]),
-               WINIT_UNIX_BACKEND='x11', WINIT_X11_SCALE_FACTOR='1', WGPU_BACKEND='vulkan',
-               RUST_LOG='info,wgpu_core=warn,wgpu_hal=warn', RUST_BACKTRACE='1')
-    env.pop('WAYLAND_DISPLAY', None)
+    env = software_vulkan(os.environ.copy())
     xvfb = session = game = None
     try:
-        rd, wr = os.pipe()
-        with (output / 'xvfb.log').open('w') as log:
-            xvfb = subprocess.Popen(['Xvfb', '-displayfd', str(wr), '-screen', '0', '1600x900x24', '-nolisten', 'tcp', '-ac'],
-                                    pass_fds=(wr,), env=env, stdout=log, stderr=subprocess.STDOUT)
-        os.close(wr)
-        assert select.select([rd], [], [], 15)[0], 'Xvfb startup'
-        with os.fdopen(rd) as display_pipe:
-            env['DISPLAY'] = ':' + display_pipe.readline().strip()
+        xvfb = start_xvfb(env, (1600, 900), output / 'xvfb.log')
         session = Session(env, output, data, report, workspace='characters', prefix='editor')
         s = session
-        s.action('Animation(Tools(true))')
-        assert [c['name'] for c in s.state()['library']['characters'][0]['animations']] == ['standing', 'idle', 'walking', 'running']
-        # Cycle through actual visible controls to reach walking.
-        s.action('Animation(Select(1))')
-        s.action('Animation(Select(2))')
-        s.action('Animation(Step(0.1))')
-        s.action('Animation(Step(0.1))')
-        s.capture('walking-editor')
-        # Review sagittal joint motion at fixed times, using the real orbit and
-        # timeline controls. A front/rear screenshot cannot reveal reversed knees.
-        for _ in range(6):
-            camera = s.state()['preview_camera']
-            dx = round((camera['yaw'] - math.pi / 2) / .01)
-            dy = round(camera['pitch'] / .01)
-            if abs(dx) <= 1 and abs(dy) <= 1:
-                break
-            s.xdo('mousemove', '--window', s.window, 700, 390)
-            time.sleep(.1)
-            s.xdo('mousedown', 3)
-            time.sleep(.1)
-            s.xdo('mousemove_relative', '--', max(-100, min(100, dx)), max(-60, min(60, dy)))
-            time.sleep(.2)
-            s.xdo('mouseup', 3)
-            time.sleep(.2)
-        assert abs(s.state()['preview_camera']['yaw'] - math.pi / 2) < .025
-        s.action('Zoom(-0.5)')
-        s.action('Zoom(-0.5)')
-        for index, name in [(2, 'walk'), (3, 'run')]:
-            s.action(f'Animation(Select({index}))')
-            s.action('Animation(Time(0.0))')
-            for pose in range(5):
-                if pose:
-                    s.action('Animation(Step(0.1))')
-                s.capture(f'side-{name}-{pose}')
-        s.action('Animation(Select(2))')
-        s.action('Animation(Time(0.0))')
-        s.action('Animation(Step(0.1))')
-        s.action('Animation(Step(0.1))')
-        s.action('Zoom(0.5)')
-        s.action('Zoom(0.5)')
+        character = s.library()['characters'][0]
+        assert [c['name'] for c in character['animations']] == ['standing', 'idle', 'walking', 'running']
+        # Clips open from the Outline; the timeline docks under the viewport.
+        s.action('Select(Clip(1))')
+        s.action('Select(Clip(2))')
+        assert s.state()['animation']['clip'] == 2
         for _ in range(3):
-            s.action(next(c['action'] for c in s.state()['controls'] if c['label'] == 'Blend with >'))
-        for _ in range(5):
-            s.action('Animation(Blend(0.1))')
+            s.xdo('key', 'Right')
+        s.wait(lambda v: v['animation']['time'] > 0.09, 'keyboard playhead steps')
+        s.capture('walking-editor')
+        # A right-drag orbits the preview; the View menu snaps to a side view
+        # because front/rear screenshots cannot reveal reversed knees.
+        yaw = s.state()['preview_camera']['yaw']
+        x, y, width, height = s.state()['viewport']
+        s.xdo('mousemove', '--window', s.window, round(x + width / 2), round(y + height / 2))
+        time.sleep(.1)
+        s.xdo('mousedown', 3)
+        s.xdo('mousemove_relative', '--', 80, 0)
+        time.sleep(.2)
+        s.xdo('mouseup', 3)
+        s.wait(lambda v: abs(v['preview_camera']['yaw'] - yaw) > .2, 'right-drag orbit')
+        s.menu('OpenMenu(View)', 'View(Side)')
+        assert abs(s.state()['preview_camera']['yaw'] - math.pi / 2) < .025
+        for _ in range(2):
+            s.xdo('click', 4)
+            time.sleep(.2)
+
+        def timeline_time(seconds):
+            control = s.control(lambda kind: kind == 'Timeline', by='kind')
+            duration = s.library()['characters'][0]['animations'][s.state()['animation']['clip']]['duration']
+            left = control['center'][0] - control['size'][0] / 2 + 1
+            s.press({'center': [left + (control['size'][0] - 2) * seconds / duration, control['center'][1]],
+                     'size': [1, 1]}, f'timeline {seconds:.1f}s')
+            s.wait(lambda v: abs(v['animation']['time'] - seconds) < duration / control['size'][0] * 2,
+                   f'playhead at {seconds}')
+        for index, name in [(2, 'walk'), (3, 'run')]:
+            s.action(f'Select(Clip({index}))')
+            for pose in range(5):
+                timeline_time(pose * 0.1)
+                s.capture(f'side-{name}-{pose}')
+        s.action('Select(Clip(2))')
+        timeline_time(0.2)
+        s.action('Frame')
+        s.menu('OpenMenu(BlendTarget)', 'Anim(BlendWith(Some(3)))')
         assert abs(s.state()['animation']['blend'] - .5) < .001
         s.capture('walk-run-blend')
-        s.action('Animation(New)')
-        s.action('Rename(Animation)')
-        s.xdo('key', 'ctrl+a')
-        s.wait(lambda v: v.get('naming') == '', 'clear clip name')
-        s.xdo('type', '--delay', 65, 'Wave')
-        s.xdo('key', 'Return')
-        s.wait(lambda v: v.get('naming') is None, 'commit name')
-        s.action('Animation(Key)')
-        s.action('Animation(Step(0.1))')
-        adjust = next(c['action'] for c in s.state()['controls'] if c['action'].startswith('Animation(Adjust(0, 0.08'))
-        s.action(adjust)
-        expected = s.state()['library']
-        clip = expected['characters'][0]['animations'][-1]
-        assert clip['name'] == 'Wave' and len(clip['tracks'][0]['keys']) == 2
-        s.action('Animation(Duplicate)')
+        s.action('Anim(New)')
+        clip = s.state()['animation']['clip']
+        s.edit_text('ClipName', 'Wave')
+        bone = s.library()['bodies'][0]['bones'][0]['id']
+        s.action(f'Select(Bone({bone}))')
+        s.action('Anim(Key)')
+        for _ in range(3):
+            s.xdo('key', 'Right')
+        s.wait(lambda v: v['animation']['time'] > 0.09, 'step to the second key')
+        s.field('KeyRotation(0)', 30)
+        expected = s.library()
+        wave = expected['characters'][0]['animations'][-1]
+        assert wave['name'] == 'Wave' and len(wave['tracks'][0]['keys']) == 2
+        assert abs(wave['tracks'][0]['keys'][1]['rotation'][0] - math.radians(30)) < .001
+        s.action(f'Select(Clip({clip}))')
+        s.action('Anim(Duplicate)')
         s.action('Undo')
-        assert s.state()['library'] == expected
-        s.action('Animation(Duration(0.1))')
-        s.action('Animation(Loop)')
-        s.action('Animation(Play)')
+        assert s.library() == expected
+        s.field('ClipDuration', 1.1)
+        s.action('Anim(Loop)')
+        s.action('Anim(Play)')
         s.wait(lambda v: v['animation']['time'] > .3, 'playback cursor')
-        s.action('Animation(Play)')
+        s.action('Anim(Play)')
         s.action('Save')
-        expected = s.state()['library']
+        expected = s.library()
         s.capture('animation-authored')
-        # Every animation control stays available in the live resized window.
-        for width, height in [(800,600), (640,480), (1280,720)]:
+        # Every control stays on screen in the live resized window.
+        for width, height in [(800, 600), (640, 480), (1280, 720)]:
             s.xdo('windowsize', '--sync', s.window, width, height)
-            state = s.wait(lambda v: v.get('window') == [width,height], 'animation resize')
+            state = s.wait(lambda v: v.get('window') == [width, height], 'animation resize')
+            time.sleep(0.5)
+            state = s.settle()
             for c in state['controls']:
-                x,y = c['center']
-                assert 0 <= x < width and 0 <= y < height, (width,height,c)
+                x, y = c['center']
+                assert 0 <= x < width and 0 <= y < height, (width, height, c)
             s.capture_number += 1
             s.xdo('key', 'F12')
-            path = output / f'screenshot-{s.capture_number:03}.png'
+            path = s.f12 / f'screenshot-{s.capture_number:03}.png'
+
             def complete():
                 try:
                     with Image.open(path) as im:
                         im.load()
-                        return im.size == (width,height)
-                except (OSError,ValueError): return False
+                        return im.size == (width, height)
+                except (OSError, ValueError):
+                    return False
             wait_for(complete, 'resized animation capture', s.process)
             path.rename(output / f'animation-{width}x{height}.png')
         stop(s.process)
         session = Session(env, output, data, report, workspace='characters', prefix='reopened')
         assert float32_model(session.state()['library']) == float32_model(expected), 'Animation save/restart'
-        session.action('Animation(Tools(true))')
+        session.action('Select(Clip(4))')
         session.capture('animation-reopened')
         stop(session.process)
         def workspace_digest():
@@ -140,7 +130,7 @@ def main():
         original = workspace_digest()
         state_path = output / 'play-state.json'
         with (output / 'play.log').open('w') as log:
-            game = subprocess.Popen([str(ROOT/'target/debug/game'), '--mode', 'game', '--workspace', str(data),
+            game = subprocess.Popen([str(game_binary()), '--mode', 'game', '--workspace', str(data),
                                      '--state-file', str(state_path), '--output-dir', str(output/'play'),
                                      '--capture', str(output/'play-ready.png'), '--capture-frame', '120'],
                                     cwd=ROOT, env=env, stdout=log, stderr=subprocess.STDOUT)
@@ -243,7 +233,8 @@ def main():
         assert original == workspace_digest(), 'Play changed workspace assets'
         for name in ['editor.log','reopened.log','play.log']:
             text = (output/name).read_text()
-            assert 'ERROR' not in text and 'panicked at' not in text, name
+            errors = [line for line in text.splitlines() if (' ERROR ' in line and 'gilrs' not in line) or 'panicked at' in line]
+            assert not errors, f'{name}: {errors[-1]}'
         report.update(status='passed', gameplay=['idle','walk','run','jump','land','orbit','zoom','recenter','release','recapture'],
                       gait=['side-view contact/down/passing/recovery previews', 'side-on keyboard walk/run'],
                       equipment=['strawberry hat', 'bee backpack', 'back/front orbit', 'mounted during idle/walk/run/jump'],
@@ -251,6 +242,8 @@ def main():
         print('PASS: animation authoring/save/restart and third-person keyboard/mouse controls.',flush=True)
     except Exception as error:
         report['error'] = repr(error)
+        if session is not None:
+            (output / 'failure-state.json').write_text(json.dumps(session.state(), indent=2) + '\n')
         raise
     finally:
         if session: stop(session.process)

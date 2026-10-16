@@ -1,11 +1,4 @@
 mod editor;
-mod editor_animation;
-mod editor_plugin;
-mod editor_scene;
-#[cfg(test)]
-mod editor_tests;
-mod editor_ui;
-mod editor_world;
 mod launch;
 mod play;
 mod verification;
@@ -58,7 +51,7 @@ fn main() -> bevy::app::AppExit {
                 .set(WindowPlugin {
                     primary_window: Some(Window {
                         title: match mode {
-                            LaunchMode::Editor => "Game | Character Workshop",
+                            LaunchMode::Editor => "Workshop — Game Editor",
                             LaunchMode::Game => "Game | Play Session",
                         }
                         .into(),
@@ -67,6 +60,8 @@ fn main() -> bevy::app::AppExit {
                         resizable: true,
                         ..default()
                     }),
+                    // The editor asks before discarding unsaved work.
+                    close_when_requested: mode == LaunchMode::Game,
                     ..default()
                 }),
         )
@@ -77,7 +72,7 @@ fn main() -> bevy::app::AppExit {
         ));
     match mode {
         LaunchMode::Editor => {
-            app.add_plugins(editor_plugin::EditorPlugin);
+            app.add_plugins(editor::EditorPlugin);
         }
         LaunchMode::Game => {
             app.add_plugins(play::GamePlugin);

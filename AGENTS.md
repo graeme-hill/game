@@ -1,8 +1,10 @@
 # Development and verification
 
 Follow `spec.md`: Rust, Bevy, source-defined scenes, and decoupled ECS systems.
-The current application implements V1 body, voxel prop, and character creators.
-See `v1-plan.md` for the creator milestone. Character animations and a third-person
+The editor (`src/editor/`) is a workspace editor in the style of a game-engine
+editor: Explorer/Outline on the left, tabbed 3D viewport, Inspector on the right.
+Editor state and actions live in `src/editor/{mod,actions,fields}.rs`; the UI in
+`src/editor/ui/` is rebuilt from that state. See `README.md` for its features. Character animations and a third-person
 playground, socket-connected voxel tiles, and seeded neighbourhood generation are implemented.
 Run `scripts/tiles_smoke.py` for tile/world editing and terrain collision coverage.
 Run `scripts/motion_smoke.py`
@@ -28,9 +30,12 @@ For changes affecting rendering or interaction:
   does not constitute visual review.
 - Extend the scenario or add a command-line entry point when a new feature needs
   different setup. Preserve ordinary interactive navigation.
-- The creator harness reads button bounds from `--state-file` and sends real
+- The creator harness reads control bounds from `--state-file` and sends real
   input. Keep this manifest accurate; do not replace interaction coverage with
   injected model data. Test data stays isolated with `--data-dir`.
+- In sandboxes without Unix sockets, run the scripts with `XVFB_TCP=1` inside a
+  mount namespace that gives Xvfb a private `/tmp` (for example
+  `unshare -rm sh -c 'mount -t tmpfs none /tmp; exec python3 scripts/...'`).
 - Keep generated evidence under ignored `artifacts/`. Report what was actually
   launched and viewed, and distinguish software rendering from hardware testing.
 

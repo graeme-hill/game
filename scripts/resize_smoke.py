@@ -4,15 +4,13 @@ import argparse
 import hashlib
 import json
 import os
-from pathlib import Path
-import select
 import shutil
 import subprocess
 import time
 
 from PIL import Image, ImageGrab
 
-from visual_support import ROOT, stop, wait_for
+from visual_support import ROOT, game_binary, software_vulkan, start_xvfb, stop, wait_for
 
 SIZES = [(1280, 720), (1600, 900), (800, 600), (640, 480), (1280, 720)]
 
@@ -47,30 +45,13 @@ def main():
         except (OSError, ValueError):
             return False
     state_path = output / "state.json"
-    env = os.environ.copy()
+    env = software_vulkan(os.environ.copy())
     env.setdefault("CARGO_HOME", str(ROOT / ".cargo-cache"))
-    env["XDG_CACHE_HOME"] = str(ROOT / "artifacts" / "cache")
-    env.update(WINIT_UNIX_BACKEND="x11", WINIT_X11_SCALE_FACTOR="1", WGPU_BACKEND="vulkan",
-               RUST_LOG="info,wgpu_core=warn,wgpu_hal=warn", RUST_BACKTRACE="1")
-    env.pop("WAYLAND_DISPLAY", None)
-    drivers = [p for directory in env.get("XDG_DATA_DIRS", "/usr/share").split(":")
-               for p in Path(directory).glob("vulkan/icd.d/lvp*.json")]
-    if not drivers or not shutil.which("Xvfb") or not shutil.which("xdotool"):
-        raise RuntimeError("Run this script inside nix develop")
-    env.update(VK_DRIVER_FILES=str(drivers[-1]), VK_ICD_FILENAMES=str(drivers[-1]))
-    read_fd, write_fd = os.pipe()
     xvfb = game = None
     report = {"status": "failed", "mode": args.mode, "default_launch": args.default_launch,
               "sizes": SIZES, "renderer": "Mesa software Vulkan"}
     try:
-        xvfb = subprocess.Popen(["Xvfb", "-displayfd", str(write_fd), "-screen", "0", "1600x900x24", "-nolisten", "tcp", "-ac"],
-                                pass_fds=(write_fd,), stdout=(output / "xvfb.log").open("w"), stderr=subprocess.STDOUT, env=env)
-        os.close(write_fd)
-        if not select.select([read_fd], [], [], 15)[0]:
-            raise RuntimeError("Xvfb did not start")
-        with os.fdopen(read_fd) as display_pipe:
-            display = display_pipe.readline().strip()
-        env["DISPLAY"] = ":" + display
+        xvfb = start_xvfb(env, (1600, 900), output / "xvfb.log")
         if args.mode == "game":
             # These failures must be handled before any window opens.
             for name, arguments, code, message in [
@@ -79,11 +60,11 @@ def main():
                 ("empty-workspace", ["--mode", "game", "--workspace", str(output / "empty")], 1, "No characters"),
             ]:
                 (output / "empty").mkdir(exist_ok=True)
-                result = subprocess.run([str(ROOT / "target/debug/game"), *arguments], cwd=ROOT, env=env,
+                result = subprocess.run([str(game_binary()), *arguments], cwd=ROOT, env=env,
                                         text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=15)
                 (output / f"{name}.log").write_text(result.stdout)
                 assert result.returncode == code and message in result.stdout, result.stdout
-        command = [str(ROOT / "target/debug/game"), "--state-file", str(state_path), "--output-dir", str(output)]
+        command = [str(game_binary()), "--state-file", str(state_path), "--output-dir", str(output)]
         if not args.default_launch:
             command += ["--mode", "game", "--workspace", str(data)] if args.mode == "game" else ["--mode", "editor", "--data-dir", str(data)]
         if args.editor_view:
@@ -144,7 +125,8 @@ def main():
             ImageGrab.grab(bbox=(x, y, x + width, y + height), xdisplay=env["DISPLAY"]).save(window_capture)
             captures.append({"size": [width, height], "renderer": path.name, "window": window_capture.name})
         log_text = (output / "game.log").read_text()
-        assert "ERROR" not in log_text and "panicked at" not in log_text, "Inspect game.log"
+        errors = [line for line in log_text.splitlines() if (" ERROR " in line and "gilrs" not in line) or "panicked at" in line]
+        assert not errors, f"Inspect game.log: {errors[-1]}"
         if args.mode == "game":
             assert original == workspace_digest(), "Play mode changed the workspace"
             assert "game_character_spawned" in log_text

@@ -194,6 +194,15 @@ pub fn save_workspace(dir: &Path, library: &Library) -> Result<(), String> {
     save(&dir.join("library.json"), library)
 }
 
+/// Remove the source file of a resource deleted in the editor. Missing files
+/// are not an error: the resource may never have been saved.
+pub fn delete_resource(dir: &Path, extension: &str, id: u32) -> Result<(), String> {
+    if let Some(path) = existing_resource_path(dir, extension, id) {
+        fs::remove_file(&path).map_err(|e| format!("Delete {}: {e}", path.display()))?;
+    }
+    Ok(())
+}
+
 /// Read source files if present; otherwise open a pre-workspace library.json.
 pub fn load_workspace(dir: &Path) -> Result<Library, String> {
     if !dir.is_dir() {

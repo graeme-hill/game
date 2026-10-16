@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "resource": {
+    "id": 40,
+    "name": "Hat",
+    "blocks": [],
+    "anchors": []
+  }
+}

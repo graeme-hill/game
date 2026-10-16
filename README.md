@@ -80,100 +80,149 @@ including character movement and turning, and removes props when their character
 is removed. This logical parenting avoids inheriting the SDF bounding proxy's
 changing scale.
 
-## V1 creators
-
-The implementation plan and acceptance criteria are in [v1-plan.md](v1-plan.md).
-The game starts at **1280×720 physical pixels**, including on HiDPI desktops, and
-is resizable at runtime. UI scale and the 3D preview viewport follow the live
-client area. Keep the baseline usable, then verify other sizes with
-`scripts/resize_smoke.py`.
+## Workshop editor
 
 ```sh
 export CARGO_HOME="$PWD/.cargo-cache"
 cargo run --locked -- --mode editor
 ```
 
-The editor opens `test_workspace` by default. Use `--workspace DIR` to open
-another directory, or `--data-dir DIR` to start at the workspace chooser.
-The left Explorer lists its
-`.body`, `.prop`, and `.character` source resources; right-click the Explorer
-(or use **New ▾**) to create one. Selecting a resource opens its editor in a
-tab, so several resources can stay open while you switch among them. The
-resource-specific Inspector floats on the right. **Save** writes editable
-source files directly in the workspace plus `library.json` as a compatibility
-snapshot, with the previous snapshot retained as `library.json.bak`.
-Unsaved changes mark the Save button with `*`. **Reopen** reloads the saved
-library; Undo can recover the working state from before reopening.
+The editor is laid out like a game-engine editor. It works on a **workspace**:
+a folder of source resources, much like opening a project folder in VS Code.
+
+- **Top bar**: File menu (open workspace, save, revert, play), the workspace
+  folder, Save (● marks unsaved changes), Undo/Redo, a breadcrumb for the
+  active document, **New** and **Play**.
+- **Explorer** (left, top): every resource grouped by kind (Bodies, Props,
+  Characters, Tiles by category, Worlds) plus the workspace's Socket rules.
+  Type in the filter box to narrow the list. Click to open, right-click for
+  Open / Rename / Duplicate / Delete, `+` on a folder to create one. Deleting is
+  refused while something references the resource (a body used by a character,
+  a tile placed in a world); Undo restores deletions, and Save removes the file.
+- **Outline** (left, bottom): the parts of the open document — the bone
+  hierarchy with mounts under their bones, anchors, equipped props, animation
+  clips, sockets and collision boxes, or a world's pieces and their sockets.
+  Selecting an item shows it in the Inspector and highlights it in 3D. Up/Down
+  move through the list, right-click offers actions for the item, and
+  double-click renames it (double-clicking an Explorer row renames a resource).
+  The Explorer and Outline scroll to show what you open or select.
+- **Tabs and viewport** (center): open documents stay in tabs (● marks unsaved
+  ones). The viewport has floating tool and view controls and a corner axis
+  indicator. Right-drag orbits, middle-drag (or Shift+right-drag) pans, the
+  wheel zooms; on bodies, characters and worlds a left-drag also orbits. `F`
+  frames, `G` toggles guides, `1`/`3`/`7`/`0` pick front/side/top/perspective
+  views, and `\` hides both side panels to focus on the viewport. Whatever a
+  click would select highlights under the pointer.
+- **Move handles**: a selected bone (tip and joint), mount, anchor, socket or
+  equipped prop gets a gizmo in the viewport. Drag an arrow to move along that axis or the
+  center to move in the view plane; hold Ctrl to snap to 0.1. Handles edit the
+  same values as the Inspector, and each drag is one undo step.
+- **Inspector** (right): properties of the selection in collapsible sections.
+  Vector fields show colored X/Y/Z; **drag a number horizontally to scrub it**
+  (one undo step per drag), click it to type an exact value (Up/Down step it).
+  Names edit in place. Dropdowns choose bodies, props, anchors, mounts and
+  socket types.
+- **Status bar**: the result of the last action, resource counts, save state.
+  Undo/Redo name the step they would revert or reapply ("Undo Move bone tip").
+
+Panels resize by dragging their edges (and the Explorer/Outline divider). The
+window starts at **1280×720 physical pixels**, including on HiDPI desktops, and
+is resizable at runtime; UI scale and the 3D viewport follow the live client
+area, and side panels yield space in small windows. Verify other sizes with
+`scripts/resize_smoke.py`.
+
+`--workspace DIR` opens a folder directly; `--data-dir DIR` (without
+`--workspace`) starts at the welcome screen to choose one. The welcome screen
+and the Open Workspace dialog list recently opened workspaces (stored in
+`$XDG_CONFIG_HOME/workshop-editor/recent.json`; not recorded when
+`--state-file` is used, so test runs leave it alone). **Save** (Ctrl+S)
+writes every resource as its own source file plus `library.json` as a
+compatibility snapshot (the previous snapshot is kept as `library.json.bak`).
+**Revert** reloads the saved files; Undo can recover the working state.
+Closing the window or opening another workspace with unsaved changes asks
+whether to save them first (Save / Don't save / Cancel). Tabs have a context
+menu (close, close others, close all, rename, duplicate) and close on
+middle-click. **F1** (or `?`) shows every keyboard shortcut.
+
+| Shortcut | Action |
+| --- | --- |
+| Ctrl+S / Ctrl+Z / Ctrl+Y (Ctrl+Shift+Z) | Save / undo / redo |
+| Ctrl+N, Ctrl+D, Ctrl+W, Ctrl+Tab | New menu, duplicate, close tab, next tab |
+| Ctrl+O | Open workspace |
+| F2 / Del / Esc | Rename / delete / deselect the selection |
+| B / E / V, `[` `]` | Paint / erase / select tools, brush size |
+| Space, `,` `.`, ← → | Play animation, previous/next key, step 1/30 s |
+| ↑ ↓, double-click | Move through the Outline, rename |
+| M, Alt+click | Mirror painting, pick a voxel color |
+| `\` | Hide/show the side panels |
+| K | Key the selected bone at the playhead |
+| F5 | Save and play |
+| F1, `?` | Keyboard shortcuts |
 
 ### Create a body
 
-1. Open **Bodies**, choose **New**, then **Rename**. Name entry supports typing,
-   Backspace, Ctrl+A to clear, Enter to confirm, and Escape to cancel.
-2. **+ Root** starts an empty armature. **+ Child** connects a new bone to the
-   selected bone's tip. Use `<` and `>` to select bones.
-3. **Tip XYZ** edits the bone's end relative to its joint. **Joint XYZ** edits
-   its start relative to the parent's tip (or the origin for a root). Values
-   use body axes and 0.1-unit increments. Moving a parent tip moves descendants.
-4. Adjust thickness, switch **Capsule / Sphere**, and choose a color. Spheres
-   are centered at bone tips. The smooth body is raymarched from these shapes,
-   with blended joints and colors; it is not a mesh approximation.
-5. Select the head bone, open **Mounts**, and **Add mount**. Name the mount and
-   adjust position relative to that bone's tip and rotation in 15-degree steps.
-   A newly added mount starts one bone radius above the tip.
+1. **New → Body**; the new resource's name is selected, so just type and Enter.
+2. **Add root bone** starts an armature (or use the **Humanoid template**). With
+   a bone selected, **Add child** connects a new bone to its tip. Click bones in
+   the Outline or the viewport to select them.
+3. **Joint** is the bone's start relative to its parent's tip (or the origin
+   for a root); **Tip** is its end relative to the joint. Moving a parent moves
+   its descendants.
+4. Choose **Capsule / Sphere**, a radius and a color. Spheres are centered at
+   bone tips. The smooth body is raymarched from these shapes, with blended
+   joints and colors; it is not a mesh approximation.
+5. **Add mount** on a selected bone creates an attachment point one radius
+   above its tip; give it a name, offset and rotation.
+6. **Mirror branch** copies a bone and its children (and their mounts) to the
+   other side, swapping Left/Right and L/R in the names. The **Parent**
+   dropdown moves a bone under another bone (or makes it a root) while keeping
+   its joint where it is.
 
-**Delete branch** removes the bone, descendants, and their mounts; affected
-character attachments are removed too. Undo restores the complete edit.
-An optional **New starter body** provides a ready-made six-bone rest pose.
-Bodies support up to 32 bones. Animations belong to characters using that body.
+**Delete branch** removes the bone, its descendants and their mounts; affected
+character attachments and animation tracks are removed too, and Undo restores
+the complete edit. Bodies support up to 32 bones.
 
 ### Make a voxel hat or other prop
 
-1. Open **Props**, choose **New**, and name it. The workspace is a 32×32×32 grid;
-   one voxel is 0.1 world units.
-2. Select a color and a 1×, 2×, 4×, 8×, or 16× brush. The X/Y/Z controls move
-   the cursor by the brush size. Changing brush size preserves its position,
-   clamped to the grid bounds, so coarse and fine placement can be combined.
-3. **Paint cursor** fills the cursor cube; **Erase cursor** removes it. You can
-   also click the grid or voxel faces using the selected **Paint / Erase** mode.
-   Y sets the plane used when clicking empty space.
-4. For a hat, build a wide flat brim and a narrower raised crown. Switching
-   colors paints different regions. Large homogeneous blocks remain compact
-   in storage; the mesher merges exterior faces and removes internal faces.
-5. Position the cursor at the hat's attachment point, switch to **Anchors**,
-   and **Add anchor**. Name it and fine-tune its position/rotation. The anchor
-   will align to the body mount when assembled.
-
-Ctrl+Z / **Undo** and Ctrl+Y / **Redo** apply to document edits. Fine erasing
-inside a coarse block preserves all surrounding voxels.
+1. **New → Prop**. The grid is 32×32×32; one voxel is 0.1 world units.
+2. Pick **Paint** or **Erase**, a 1–16 brush and a color (palette or RGB;
+   Alt+click a voxel to pick up its color). Click or drag in the viewport:
+   clicks paint on the face under the pointer or on the cursor's layer in empty
+   space, and a drag paints along the plane it started on. **Mirror across X**
+   (`M`) paints both halves symmetrically. The voxel cursor can also be typed
+   exactly, with **Paint/Erase at cursor**.
+3. Large homogeneous blocks remain compact in storage; the mesher merges
+   exterior faces and removes internal faces. Fine erasing inside a coarse block
+   preserves the surrounding voxels.
+4. With the **Select** tool, clicking moves the voxel cursor; **Add anchor at
+   cursor** creates the point that aligns with a body mount when equipped.
 
 ### Assemble a character
 
-1. Open **Characters**, choose **New**, and name it.
-2. The **Body** and **Prop** controls cycle through the available assets. Select
-   a body mount and prop anchor with their arrow controls.
-3. **Attach prop** aligns the chosen anchor to the chosen mount. Add more props
-   to equip multiple items. Item arrows select an attachment; **Remove** removes
-   it. Position, rotation, and scale adjust its fit.
-4. Save, exit, and reopen: bones, voxels, anchors, and attachments stay editable.
-
-Changing to a different body clears the character's old attachments and animation
-tracks because their mounts and bones belong to the previous body. Undo restores the original assembly.
-Changes to an existing body or prop are reflected in characters that reference it.
-
-Use the preview's **Orbit**, **Near**, **Far**, and **Guides** controls, or
-right-drag to orbit and the wheel to zoom. Guides show bone endpoints, mounts,
-anchors, the grid, and the voxel brush. Turn guides off for a clean preview.
+1. **New → Character** (it uses the first body; change it from the Body
+   dropdown). Changing to a different body clears the old attachments and
+   animation tracks because their mounts and bones belong to that body; Undo
+   restores them.
+2. In **Equip a prop**, choose a prop, its anchor and a body mount (clicking a
+   mount in the viewport chooses it too), then **Attach**. Select an equipped
+   prop in the Outline to adjust its offset, rotation and scale or remove it.
+3. Changes to a body or prop are reflected in every character that uses it.
 
 ## Animate a character
 
-Open a character and choose **Animations** in the Inspector. **New**, **Copy**,
-**Rename**, and **Delete** manage any number of named clips. Select a bone in
-the left Explorer, move the time cursor with Start/End, ±0.1s, or Key arrows,
-then adjust rotation or offset to insert/update a key. **Set key** records the
-current pose; **Delete key** removes the key at that time. Length rescales key
-times. Play/Pause and Loop control preview playback. Choose **Blend with >**
-and a percentage to preview two clips at a shared normalized time. Undo/Redo,
-Save, and Reopen work with animation edits.
+Clips are listed under **Animations** in a character's Outline; **New clip**
+and **Add locomotion** are in the Inspector. Selecting a clip opens the
+**timeline** under the viewport: transport controls, loop, the playhead (click
+or drag the ruler), key markers for all bones and for the selected bone, and a
+**Blend** dropdown that previews two clips at a shared normalized time.
+
+Select a bone (Outline or viewport) to see its **Pose** at the playhead. Editing
+a rotation or offset value creates or updates that bone's key; **Key** records
+the current pose and the ✕ button deletes the key at the playhead. Drag a key
+marker to retime it (on the **All bones** row, the whole pose at that time
+moves together); click a marker to jump to it. ← → step the playhead by a
+frame (1/30 s). The clip's
+Length rescales key times. Undo/Redo, Save and Revert cover animation edits.
 
 **Add locomotion** creates missing `standing`, `idle`, `walking`, and `running`
 clips for humanoid bones named Torso, Head, Left/Right upper/lower arm/leg.
@@ -241,22 +290,33 @@ nix develop --command cargo run --locked -- --mode editor --workspace test_works
 nix develop --command cargo run --locked -- --mode game --workspace test_workspace
 ```
 
-Use the **Tiles** and **Worlds** toolbar buttons or select their source resources
-in Explorer. Tiles support new/duplicate/rename, voxel paint/erase at an explicit
-voxel cursor, socket name/type/profile/position/facing/requirement editing, a **Rules** tab
-for custom many-to-many compatibility pairs, and collision-box
-authoring. **Frame all** fits the current asset. Socket guides show facing; the
-collision tool shows boxes. Source documents also expose profiles and arbitrary
-allowed orientation quaternions. Cursor steps are 0.1 world units.
+Open tiles and worlds from the Explorer (tiles are grouped by category).
+Tiles use the same voxel brush as props, plus **Socket** and **Collision** tools:
+clicking near a socket selects it, and elsewhere a click moves the voxel cursor
+where **Add socket** / **Add box** create new ones. A socket has a name, a type
+(choose from the dropdown or create a new type), a profile, a position in voxel
+units, a facing (**Turn 90°**) and a **Required** flag; guides show sockets as
+markers with facing arrows (required ones in pink). The ⟳ tool previews each
+allowed rotation. Source documents also expose arbitrary allowed orientation
+quaternions.
 
-Worlds support selecting a piece in the viewport or with Piece controls, selecting
-one of its sockets, choosing a tile and rotation, and **Place**. A green wireframe
-previews a valid placement. The first piece is placed at the origin. Subsequent
-pieces must connect to the selected free socket. All coincident sockets are
-checked and connected, and occupied volumes cannot intersect. **Remove**, Undo,
-Redo, Save, and Reopen work on the graph. Incomplete worlds can be saved as drafts;
-**Validate** and **Save & play** require a complete world. Play opens a separate
-game window. `--world ID` selects a particular saved world's numeric ID.
+**Socket rules** is its own document: a symmetric matrix of socket types where
+clicking a cell allows or forbids that pair. New types can be added there too.
+
+In a world, click a piece to select it (the Outline lists its sockets). Open
+sockets glow; **click an open socket to get a menu of every tile and rotation
+that fits there**, and choose one to place it. The Inspector offers the same
+choice with a tile dropdown, rotation and **Place**, with a green box previewing
+a valid placement. An empty world starts by placing a chosen tile at the origin.
+All coincident sockets are checked and connected, and occupied volumes cannot
+intersect. **Complete piece** fills the selected piece's required sockets — and
+those of everything it adds — with fitting tiles (preferring tiles that need
+the least, varied by the generator seed): for example, a trunk planted on grass
+grows its branches and foliage. It is one undo step and changes nothing if a
+required socket cannot be filled. **Remove**, Undo, Redo, Save, and Revert work on the graph.
+Incomplete worlds can be saved as drafts; **Validate** and **Play world**
+require a complete world. Play opens a separate game window. `--world ID`
+selects a particular saved world's numeric ID.
 
 World storage is a spatial graph of piece instances and socket connections,
 not a tile array. Standard 12.8-unit terrain footprints and quarter-turn rotations
@@ -303,8 +363,9 @@ nix develop --command python3 scripts/resize_smoke.py --editor-view tiles
 ```
 
 The tile scenario uses real controls to author voxels, sockets and collision,
-place rotated road pieces, generate/save/reopen a world, and walk from the road
-up the curb, along an entrance path, through a doorway, and into a blocking wall.
+toggle a rule in the matrix, place a road corner by clicking an open socket in
+the viewport, generate/save/revert/reopen a world, and walk from the road up the
+curb, along an entrance path, through a doorway, and into a blocking wall.
 
 ## Automated visual loop (Linux)
 
@@ -315,17 +376,25 @@ nix develop --command python3 scripts/creator_smoke.py --no-build
 ```
 
 The harness builds the actual game and runs a private Xvfb window using Mesa
-software Vulkan. It creates a six-bone body **from scratch through the UI**,
-paints a multicolor voxel hat, exercises coarse/fine erasing and undo/redo,
-creates an anchor and mount, equips the hat, saves, and restarts the process.
-It also exercises direct viewport painting, attachment rotation, command-line
-capture, and the capture-failure exit code.
+software Vulkan. Starting at the welcome screen, it opens an empty workspace and
+creates a six-bone body **from scratch through the UI** (typing exact values and
+drag-scrubbing a field, with one undo step per drag), paints a multicolor voxel
+hat, exercises coarse/fine erasing and undo/redo, creates an anchor and mount,
+equips the hat, saves, and restarts the process. It also exercises direct
+viewport painting, attachment rotation, command-line capture, and the
+capture-failure exit code.
 
 Tests use isolated data under a unique `artifacts/creator-*/` directory. Evidence
 includes JSON reports, interaction logs, editable saved data, renderer PNGs,
 independent X server PNGs, and UI/state manifests. Creator baseline images are
-1280×720. The harness reads actual button bounds from `--state-file`; it sends
-real input and never injects a prebuilt character into the tested library.
+1280×720. The harness reads actual control bounds from `--state-file` (and
+wheel-scrolls panes to reveal controls, like a user); it sends real input and
+never injects a prebuilt character into the tested library.
+
+Where Unix sockets are unavailable (restricted sandboxes), set `XVFB_TCP=1` to
+run Xvfb on a localhost TCP display instead; Xvfb still needs a writable `/tmp`
+for its lock file. The scripts run the binary from `$CARGO_TARGET_DIR/debug`
+when that variable is set.
 
 After a visual change, run the harness and inspect its report/logs. Open the
 relevant PNGs with the agent's image-viewing tool and assess the UI, geometry,
@@ -342,7 +411,9 @@ cargo clippy --locked --all-targets -- -D warnings
 
 Unit tests cover model validation, hierarchy and attachment transforms, sparse
 voxel edits versus a dense reference, greedy mesh surfaces, persistence,
-cascading deletion, and editor undo/reload behavior. `examples/sdf_check.rs`
+cascading deletion, and editor behavior: tabs, selection, typed and scrubbed
+values, drag gestures as single undo steps, resource duplication and deletion,
+socket placement options, and undo/revert. `examples/sdf_check.rs`
 is an isolated depth/lighting diagnostic used during renderer development.
 
 ## Launch and capture options
@@ -354,19 +425,20 @@ cargo run --locked -- --mode editor --workspace data --editor-view characters \
 
 - `--mode editor|game` chooses the entry point (default `game`).
 - `--workspace DIR` selects the workspace directory (default `test_workspace`) and skips the chooser.
-- `--editor-view bodies|props|characters` opens a creator directly. This replaces
-  the old `--workspace bodies|props|characters` shortcut.
+- `--editor-view bodies|props|characters|tiles|worlds` opens the first resource
+  of that kind directly.
 - `--data-dir DIR` overrides the default workspace with a fallback directory; an explicit
   `--workspace` takes precedence regardless of argument order. With `--mode editor`
-  and no editor view flags, this opens the workspace chooser. Harnesses use isolated directories.
+  and no editor view flags, this opens the welcome screen. Harnesses use isolated directories.
 - F12 saves `screenshot-001.png`, etc., under `--output-dir DIR` (default
   `artifacts/manual`). Numbering restarts each process.
 - `--capture FILE.png --capture-frame N` requests an automatic renderer capture
   after warmup. `--exit-after-capture` exits only after writing it; write errors
   return exit code 1. The harness verifies actual rendered content too.
 - `--state-file FILE.json` enables the test manifest; normal play does not write
-  this debug stream. It contains working documents, selections, notices, and
-  control positions, not commands for modifying the game.
+  this debug stream. It contains working documents, selections, notices, every
+  visible control's action and bounds, scroll panes, and the on-screen positions
+  of open world sockets — not commands for modifying the game.
 
 The unattended test uses software rendering because Xvfb lacks the Radeon
 DRI3 presentation support required here. Ordinary desktop rendering supports

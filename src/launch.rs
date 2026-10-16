@@ -52,7 +52,8 @@ pub const HELP: &str = "game [--mode editor|game] [--workspace DIR]
   --world ID               Play a selected world (default: first source path)
   --editor-view VIEW       Open bodies, props, characters, tiles, or worlds in the editor
   --data-dir DIR           Override default workspace; explicit --workspace wins
-  --browser | --mounts     Open editor browser or mount controls
+  --browser                Show the workspace browser on startup
+  --mounts                 Select the body's first mount (with --editor-view bodies)
   --scene                 Alias for --editor-view characters
   --state-file FILE.json   Write a read-only verification manifest
   --capture FILE.png      Capture renderer output after warmup
@@ -61,7 +62,7 @@ pub const HELP: &str = "game [--mode editor|game] [--workspace DIR]
   --output-dir DIR        F12 screenshot directory (default: artifacts/manual)
   --help, -h              Show this help
 Game mode loads the first character in sorted source-file path order.
-F12 saves a screenshot in either mode. Ctrl+S saves editor creations.";
+F12 saves a screenshot in either mode. Ctrl+S saves editor resources.";
 
 impl LaunchOptions {
     pub fn workspace_dir(&self) -> &Path {
