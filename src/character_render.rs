@@ -137,6 +137,7 @@ impl CharacterRenderer<'_, '_> {
                 Mesh3d(self.meshes.add(Cuboid::from_size(Vec3::ONE))),
                 MeshMaterial3d(material.clone()),
                 transform,
+                bevy::light::NotShadowCaster,
                 VisualPose {
                     locals: vec![],
                     world,
@@ -170,6 +171,8 @@ impl CharacterRenderer<'_, '_> {
             if let Some(entity) = self.prop(prop, transform) {
                 self.commands.entity(entity).insert((
                     Name::new(prop.name.clone()),
+                    // The raymarched body casts no shadow map, so neither does its gear.
+                    bevy::light::NotShadowCaster,
                     MountedProp {
                         character: root,
                         prop: prop.id,

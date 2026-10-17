@@ -1102,7 +1102,7 @@ fn world(p: Kids, cx: &Ctx) {
         hint(
             p,
             cx,
-            "Builds a street loop with houses, walkways and trees from the starter kit, as a new world document.",
+            "Builds a neighbourhood from the starter kit (hill, stream, streets, lots and parks) as a new world document. Houses sets the number of building lots.",
         );
     });
     let _ = t;

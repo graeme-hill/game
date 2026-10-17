@@ -23,9 +23,54 @@ pub fn load(path: &Path) -> Result<Library, String> {
     library.validate()?;
     Ok(library)
 }
+/// Pretty JSON with arrays of plain values (coordinates, colours, quaternions)
+/// kept on one line, so voxel-heavy documents stay compact and diffable.
+pub fn to_json<T: Serialize + ?Sized>(value: &T) -> Result<Vec<u8>, String> {
+    let pretty = serde_json::to_string_pretty(value).map_err(|e| e.to_string())?;
+    let text = collapse(&pretty, '[', ']', usize::MAX, " ");
+    // Then short flat objects (e.g. a voxel volume) on one line.
+    let text = collapse(&text, '{', '}', 100, " ");
+    Ok(text.into_bytes())
+}
+/// Join `open ... close` blocks whose members are all single lines (no nested
+/// blocks) when the result fits in `width` characters.
+fn collapse(pretty: &str, open: char, close: char, width: usize, sep: &str) -> String {
+    let lines: Vec<&str> = pretty.lines().collect();
+    let mut out = String::with_capacity(pretty.len());
+    let mut i = 0;
+    while i < lines.len() {
+        let line = lines[i];
+        if line.ends_with(open) {
+            let mut items = vec![];
+            let mut j = i + 1;
+            while j < lines.len() {
+                let t = lines[j].trim();
+                if t.starts_with([']', '}']) || t.ends_with(['[', '{']) {
+                    break;
+                }
+                items.push(t);
+                j += 1;
+            }
+            if j < lines.len() && lines[j].trim().starts_with(close) {
+                let joined = format!("{line}{}{}", items.join(sep), lines[j].trim());
+                if joined.len() <= width {
+                    out.push_str(&joined);
+                    out.push('\n');
+                    i = j + 1;
+                    continue;
+                }
+            }
+        }
+        out.push_str(line);
+        out.push('\n');
+        i += 1;
+    }
+    out.pop();
+    out
+}
 pub fn save(path: &Path, library: &Library) -> Result<(), String> {
     library.validate()?;
-    let bytes = serde_json::to_vec_pretty(library).map_err(|e| e.to_string())?;
+    let bytes = to_json(library)?;
     if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
@@ -100,11 +145,10 @@ fn write_resource<T: Serialize>(
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
-    let bytes = serde_json::to_vec_pretty(&ResourceFile {
+    let bytes = to_json(&ResourceFile {
         version: 1,
         resource,
-    })
-    .map_err(|e| e.to_string())?;
+    })?;
     fs::write(path, bytes).map_err(|e| e.to_string())
 }
 
@@ -249,6 +293,20 @@ pub fn load_workspace(dir: &Path) -> Result<Library, String> {
     }
     library.validate()?;
     Ok(library)
+}
+
+#[cfg(test)]
+mod compact_tests {
+    #[test]
+    fn scalar_arrays_share_a_line_and_round_trip() {
+        let value = serde_json::json!({"a": [1, 2.5, -3], "b": [[1, 2], [3]], "c": [], "d": ["x [", "y"], "e": [{"f": [0.1]}]});
+        let text = String::from_utf8(super::to_json(&value).unwrap()).unwrap();
+        assert!(text.contains("\"a\": [1, 2.5, -3]"), "{text}");
+        assert!(text.contains("[\"x [\", \"y\"]"), "{text}");
+        assert!(text.contains("{\"f\": [0.1]}"), "{text}");
+        let back: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(back, value);
+    }
 }
 
 #[cfg(test)]

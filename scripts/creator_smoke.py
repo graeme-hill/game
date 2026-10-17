@@ -98,7 +98,9 @@ class Session:
                 continue
             x, y, width, height = pane["rect"]
             self.xdo("mousemove", "--sync", "--window", self.window, round(x + width / 2), round(y + height / 2))
-            for button in (5,) * 12 + (4,) * 24:
+            # Long lists (e.g. a 100-tile dropdown) need more than a few notches.
+            notches = max(12, round(pane["max"] / 40) + 4)  # 40 px per wheel notch
+            for button in (5,) * notches + (4,) * (notches * 2):
                 self.xdo("click", button)
                 time.sleep(0.12)
                 found = [c for c in self.state()["controls"] if match(c[by])]

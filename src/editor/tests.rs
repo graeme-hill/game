@@ -633,19 +633,25 @@ fn tile_edits_that_break_placed_pieces_name_the_world() {
     let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("test_workspace");
     let mut s = Session::new();
     s.editor.library = game::storage::load_workspace(&workspace).unwrap();
-    let floor = s
+    let road = s
         .editor
         .library
         .tiles
         .iter()
-        .find(|t| t.name == "House floor")
-        .unwrap()
-        .id;
+        .find(|t| t.name == "Road straight")
+        .unwrap();
+    let (floor, edge) = (
+        road.id,
+        road.sockets
+            .iter()
+            .position(|s| s.name == "edge-0")
+            .unwrap(),
+    );
     s.apply(Action::Open(DocRef {
         kind: DocKind::Tile,
         id: floor,
     }));
-    s.apply(Action::Select(Sel::Socket(1)));
+    s.apply(Action::Select(Sel::Socket(edge)));
     let before = s.editor.library.clone();
     s.apply(Action::SetValue(Field::SocketPosition(0), 40.));
     assert_eq!(s.editor.library, before);
@@ -731,7 +737,7 @@ fn keys_retime_per_bone_or_for_the_whole_pose() {
 }
 
 #[test]
-fn completing_a_planted_trunk_grows_the_rest_of_the_tree() {
+fn completing_a_ground_floor_stacks_the_rest_of_the_house() {
     let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("test_workspace");
     let mut s = Session::new();
     s.editor.library = game::storage::load_workspace(&workspace).unwrap();
@@ -746,22 +752,22 @@ fn completing_a_planted_trunk_grows_the_rest_of_the_tree() {
             .unwrap()
             .id
     };
-    let (grass, trunk) = (id(&s, "Grass"), id(&s, "Tree trunk"));
-    s.apply(Action::SetPlaceTile(grass));
+    let (lot, floor) = (id(&s, "House lot"), id(&s, "House ground floor (cream)"));
+    s.apply(Action::SetPlaceTile(lot));
     s.apply(Action::Place);
-    let ground = s.editor.active_world().unwrap().instances[0].id;
-    let plant = game::tiles::tile(&s.editor.library.tiles, grass)
+    let lot_piece = s.editor.active_world().unwrap().instances[0].id;
+    let site = game::tiles::tile(&s.editor.library.tiles, lot)
         .unwrap()
         .sockets
         .iter()
-        .position(|s| s.kind == "plant")
+        .position(|s| s.kind == "lot-house")
         .unwrap();
-    s.apply(Action::Select(Sel::PieceSocket(ground, plant)));
+    s.apply(Action::Select(Sel::PieceSocket(lot_piece, site)));
     let (_, turn) = *world::options(&s.editor)
         .iter()
-        .find(|(tile, _)| *tile == trunk)
-        .expect("a trunk fits the plant socket");
-    s.apply(Action::PlaceOption { tile: trunk, turn });
+        .find(|(tile, _)| *tile == floor)
+        .expect("a lot_piece floor fits the lot's building socket");
+    s.apply(Action::PlaceOption { tile: floor, turn });
     let before = s.editor.active_world().unwrap().instances.len();
     s.apply(Action::CompletePiece);
     assert_ne!(
@@ -773,7 +779,7 @@ fn completing_a_planted_trunk_grows_the_rest_of_the_tree() {
     let w = s.editor.active_world().unwrap();
     assert!(w.instances.len() > before);
     // Every piece placed by completion has its required sockets connected.
-    for i in w.instances.iter().filter(|i| i.tile != grass) {
+    for i in w.instances.iter().filter(|i| i.tile != lot) {
         let t = game::tiles::tile(&s.editor.library.tiles, i.tile).unwrap();
         for (n, socket) in t.sockets.iter().enumerate() {
             assert!(

@@ -4,11 +4,26 @@ use game::{
     storage,
 };
 fn main() -> Result<(), String> {
-    let mut args = std::env::args().skip(1);
+    let mut args = std::env::args().skip(1).collect::<Vec<_>>();
+    let replace = args.iter().any(|a| a == "--replace-kit");
+    args.retain(|a| a != "--replace-kit");
+    let mut args = args.into_iter();
     let dir = std::path::PathBuf::from(args.next().ok_or(
-        "Usage: generate_neighbourhood WORKSPACE [SEED WIDTH DEPTH HOUSES PLANT_PERCENT]",
+        "Usage: generate_neighbourhood WORKSPACE [--replace-kit] [SEED WIDTH DEPTH HOUSES PLANT_PERCENT]",
     )?);
     let mut library = storage::load_workspace(&dir)?;
+    if replace {
+        // Remove the old kit's tile and world sources, then install the current kit.
+        for t in &library.tiles {
+            storage::delete_resource(&dir, "tile", t.id)?;
+        }
+        for w in &library.worlds {
+            storage::delete_resource(&dir, "world", w.id)?;
+        }
+        library.tiles.clear();
+        library.worlds.clear();
+        library.socket_rules = Default::default();
+    }
     if library.tiles.is_empty() {
         generation::install(&mut library)?;
     } else {

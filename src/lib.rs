@@ -3,6 +3,7 @@ pub mod body_render;
 pub mod character_render;
 pub mod controller;
 pub mod generation;
+pub mod kit;
 pub mod model;
 pub mod storage;
 pub mod terrain_collision;

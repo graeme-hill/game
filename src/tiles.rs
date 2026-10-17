@@ -262,24 +262,94 @@ impl OrientedBox {
                 .any(|a| other.axes.iter().any(|b| separated(a.cross(*b))))
     }
 }
-pub fn can_place(world: &World, tiles: &[Tile], instance: &Instance) -> Result<(), String> {
-    let mut occupied = vec![];
-    for other in &world.instances {
-        for b in tile(tiles, other.tile)?.occupied() {
-            occupied.push((other.id, OrientedBox::new(other, &b)));
-        }
+/// Per-tile local extents, cached for one placement query (or one validation
+/// or generation pass) so broad-phase checks never rescan every voxel volume
+/// of every piece. Only valid while the tiles it has seen are unchanged.
+#[derive(Default)]
+pub struct Extents(BTreeMap<u32, Option<(Bounds, Bounds)>>);
+impl Extents {
+    /// (occupied volume, occupied volume plus socket points) in tile space.
+    fn of(&mut self, t: &Tile) -> Option<(Bounds, Bounds)> {
+        self.0
+            .entry(t.id)
+            .or_insert_with(|| {
+                let occupied = union(t.occupied().iter().map(|b| (b.min, b.max)));
+                let sockets = t.sockets.iter().map(|s| {
+                    let p = s.position.map(|v| v as f32 * UNIT);
+                    (p, p)
+                });
+                let reach = union(occupied.iter().map(|b| (b.min, b.max)).chain(sockets))?;
+                Some((occupied.unwrap_or_else(|| reach.clone()), reach))
+            })
+            .clone()
     }
-    for b in tile(tiles, instance.tile)?.occupied() {
-        let candidate = OrientedBox::new(instance, &b);
-        let c = &candidate.bounds;
+    /// World-space boxes around an instance's occupied volume and its socket reach.
+    fn world(&mut self, tiles: &[Tile], i: &Instance) -> Result<Option<(Bounds, Bounds)>, String> {
+        Ok(self
+            .of(tile(tiles, i.tile)?)
+            .map(|(occupied, reach)| (world_bounds(i, &occupied), world_bounds(i, &reach))))
+    }
+}
+fn union(boxes: impl Iterator<Item = ([f32; 3], [f32; 3])>) -> Option<Bounds> {
+    boxes.fold(None, |acc: Option<Bounds>, (min, max)| {
+        Some(match acc {
+            None => Bounds { min, max },
+            Some(b) => Bounds {
+                min: std::array::from_fn(|a| b.min[a].min(min[a])),
+                max: std::array::from_fn(|a| b.max[a].max(max[a])),
+            },
+        })
+    })
+}
+fn grow(b: &Bounds, margin: f32) -> Bounds {
+    Bounds {
+        min: b.min.map(|v| v - margin),
+        max: b.max.map(|v| v + margin),
+    }
+}
+fn contains(b: &Bounds, p: Vec3) -> bool {
+    (0..3).all(|a| p[a] >= b.min[a] && p[a] <= b.max[a])
+}
+pub fn can_place(world: &World, tiles: &[Tile], instance: &Instance) -> Result<(), String> {
+    can_place_with(world, tiles, instance, &mut Extents::default())
+}
+fn can_place_with(
+    world: &World,
+    tiles: &[Tile],
+    instance: &Instance,
+    extents: &mut Extents,
+) -> Result<(), String> {
+    let candidate = tile(tiles, instance.tile)?
+        .occupied()
+        .iter()
+        .map(|b| OrientedBox::new(instance, b))
+        .collect::<Vec<_>>();
+    for shape in &candidate {
+        let c = &shape.bounds;
         if (0..3).any(|a| {
             c.min[a] < world.bounds.min[a] - 0.002 || c.max[a] > world.bounds.max[a] + 0.002
         }) {
             return Err("Piece is outside world bounds".into());
         }
-        for (id, other) in &occupied {
-            if candidate.overlaps(other) {
-                return Err(format!("Piece overlaps instance {id}"));
+    }
+    let Some((own, _)) = extents.world(tiles, instance)? else {
+        return Ok(());
+    };
+    for other in &world.instances {
+        // Broad phase: pieces that merely touch (or are far away) never overlap.
+        let Some((area, _)) = extents.world(tiles, other)? else {
+            continue;
+        };
+        if !intersects(&own, &area) {
+            continue;
+        }
+        for b in tile(tiles, other.tile)?.occupied() {
+            let shape = OrientedBox::new(other, &b);
+            if !intersects(&own, &shape.bounds) {
+                continue;
+            }
+            if candidate.iter().any(|c| c.overlaps(&shape)) {
+                return Err(format!("Piece overlaps instance {}", other.id));
             }
         }
     }
@@ -292,15 +362,34 @@ pub fn connect_instance(
     rules: &SocketRules,
     i: Instance,
 ) -> Result<(), String> {
+    connect_with(world, tiles, rules, i, &mut Extents::default())
+}
+pub fn connect_with(
+    world: &mut World,
+    tiles: &[Tile],
+    rules: &SocketRules,
+    i: Instance,
+    extents: &mut Extents,
+) -> Result<(), String> {
     if i.id == 0 || i.id == u32::MAX || world.instances.iter().any(|old| old.id == i.id) {
         return Err("Invalid or duplicate instance ID".into());
     }
-    can_place(world, tiles, &i)?;
+    can_place_with(world, tiles, &i, extents)?;
+    let own = extents.world(tiles, &i)?;
+    let mut nearby = vec![];
+    for other in &world.instances {
+        if let Some((area, reach)) = extents.world(tiles, other)? {
+            nearby.push((other, area, reach));
+        }
+    }
     let mut links = vec![];
     for (si, s) in tile(tiles, i.tile)?.sockets.iter().enumerate() {
-        for other in &world.instances {
+        let (p, r) = frame(&i, s);
+        for (other, _, reach) in &nearby {
+            if !contains(&grow(reach, 0.01), p) {
+                continue;
+            }
             for (oi, os) in tile(tiles, other.tile)?.sockets.iter().enumerate() {
-                let (p, r) = frame(&i, s);
                 let (op, or) = frame(other, os);
                 if p.distance(op) > 0.002 || (r * Vec3::Z).dot(or * Vec3::Z) > -0.999 {
                     continue;
@@ -325,47 +414,70 @@ pub fn connect_instance(
     }
     // Preserve the usable space immediately outside every still-open socket.
     // A matching connection consumes that space; an unrelated solid cannot bury it.
-    let candidate_shapes = tile(tiles, i.tile)?
-        .occupied()
-        .iter()
-        .map(|b| OrientedBox::new(&i, b))
-        .collect::<Vec<_>>();
-    let mut existing_shapes = vec![];
-    for old in &world.instances {
-        existing_shapes.extend(
-            tile(tiles, old.tile)?
-                .occupied()
-                .iter()
-                .map(|b| OrientedBox::new(old, b)),
-        );
+    let open = |p: Port| {
+        !world.connected(p)
+            && !world.exits.contains(&p)
+            && !links.iter().any(|c: &Connection| c.a == p || c.b == p)
+    };
+    let buried = |point: Vec3, owner: &Instance| -> Result<bool, String> {
+        for b in tile(tiles, owner.tile)?.occupied() {
+            let shape = OrientedBox::new(owner, &b);
+            let d = point - shape.center;
+            if (0..3).all(|a| d.dot(shape.axes[a]).abs() < shape.half[a] - 0.002) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    };
+    // The new piece's own open sockets against existing solids.
+    for (socket, s) in tile(tiles, i.tile)?.sockets.iter().enumerate() {
+        if !open(Port {
+            instance: i.id,
+            socket,
+        }) {
+            continue;
+        }
+        let (position, rotation) = frame(&i, s);
+        let point = position + rotation * Vec3::Z * 0.025;
+        for (other, area, _) in &nearby {
+            if contains(area, point) && buried(point, other)? {
+                return Err(format!(
+                    "Placement blocks unused socket {}:{}",
+                    i.id, s.name
+                ));
+            }
+        }
     }
-    let mut all = world.instances.iter().collect::<Vec<_>>();
-    all.push(&i);
-    for owner in &all {
-        for (socket, s) in tile(tiles, owner.tile)?.sockets.iter().enumerate() {
-            let p = Port {
-                instance: owner.id,
-                socket,
-            };
-            if world.connected(p)
-                || world.exits.contains(&p)
-                || links.iter().any(|c| c.a == p || c.b == p)
-            {
+    // Existing open sockets against the new piece's solids.
+    if let Some((area, _)) = &own {
+        let shapes = tile(tiles, i.tile)?
+            .occupied()
+            .iter()
+            .map(|b| OrientedBox::new(&i, b))
+            .collect::<Vec<_>>();
+        let buried = |point: Vec3| {
+            shapes.iter().any(|shape| {
+                let d = point - shape.center;
+                (0..3).all(|a| d.dot(shape.axes[a]).abs() < shape.half[a] - 0.002)
+            })
+        };
+        for (other, _, reach) in &nearby {
+            if !intersects(&grow(reach, 0.03), area) {
                 continue;
             }
-            let (position, rotation) = frame(owner, s);
-            let point = position + rotation * Vec3::Z * 0.025;
-            let shapes = if owner.id == i.id {
-                &existing_shapes
-            } else {
-                &candidate_shapes
-            };
-            for shape in shapes {
-                let d = point - shape.center;
-                if (0..3).all(|a| d.dot(shape.axes[a]).abs() < shape.half[a] - 0.002) {
+            for (socket, s) in tile(tiles, other.tile)?.sockets.iter().enumerate() {
+                if !open(Port {
+                    instance: other.id,
+                    socket,
+                }) {
+                    continue;
+                }
+                let (position, rotation) = frame(other, s);
+                let point = position + rotation * Vec3::Z * 0.025;
+                if contains(area, point) && buried(point) {
                     return Err(format!(
                         "Placement blocks unused socket {}:{}",
-                        owner.id, s.name
+                        other.id, s.name
                     ));
                 }
             }
@@ -485,8 +597,9 @@ pub fn validate_world(
     }
     let mut placed = World::empty(w.id);
     placed.bounds = w.bounds.clone();
+    let mut extents = Extents::default();
     for i in &w.instances {
-        connect_instance(&mut placed, tiles, rules, i.clone())?;
+        connect_with(&mut placed, tiles, rules, i.clone(), &mut extents)?;
         for (n, s) in tile(tiles, i.tile)?.sockets.iter().enumerate() {
             if s.required
                 && !used.contains(&Port {

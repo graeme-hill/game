@@ -1,445 +1,35 @@
-//! Deterministic authored voxel kit and bounded constraint generation.
-use crate::tiles::World;
-use crate::{model::Library, tiles::*};
+//! Starter kit installation and seeded neighbourhood generation.
+//!
+//! Generation plans a grid of 12.8-unit cells (hill, stream, roads, paths,
+//! lots and parks), chooses for every cell a tile and quarter turn whose edge
+//! sockets match the plan, and then dresses the world through decoration
+//! sockets: buildings on lots, fences, street furniture and planting. Every
+//! piece is placed through the ordinary socket/occupancy checks.
+use crate::kit::{self, Rng};
+use crate::model::Library;
+use crate::tiles::{World, *};
 use bevy::prelude::*;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
-const GRASS: [f32; 3] = [0.30, 0.53, 0.22];
-const PAVE: [f32; 3] = [0.65, 0.66, 0.61];
-const ROAD: [f32; 3] = [0.17, 0.20, 0.23];
-const WALL: [f32; 3] = [0.87, 0.74, 0.49];
-const ROOF: [f32; 3] = [0.57, 0.19, 0.12];
-fn up() -> Quat {
-    Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2)
-}
-fn down() -> Quat {
-    up() * Quat::from_rotation_y(std::f32::consts::PI)
-}
-fn socket(name: &str, kind: &str, p: [i32; 3], r: Quat, profile: &str, required: bool) -> Socket {
-    Socket {
-        name: name.into(),
-        kind: kind.into(),
-        position: p,
-        rotation: r.to_array(),
-        profile: profile.into(),
-        required,
-    }
-}
-fn piece(id: u32, name: &str, category: &str) -> Tile {
-    Tile {
-        id,
-        name: name.into(),
-        category: category.into(),
-        voxels: vec![],
-        colliders: vec![],
-        sockets: vec![],
-        rotations: (0..4).map(yaw).collect(),
-    }
-}
-fn volume(t: &mut Tile, min: [i32; 3], max: [i32; 3], color: [f32; 3], solid: bool) {
-    if (0..3).any(|a| min[a] >= max[a]) {
-        return;
-    }
-    t.voxels.push(Volume { min, max, color });
-    if solid {
-        t.colliders.push(Bounds {
-            min: min.map(|v| v as f32 * UNIT),
-            max: max.map(|v| v as f32 * UNIT),
-        });
-    }
-}
-fn terrain(id: u32, name: &str, mask: u8, plot: bool) -> Tile {
-    let mut t = piece(id, name, if plot { "plot" } else { "terrain" });
-    if mask == 0 {
-        volume(&mut t, [-64, -4, -64], [64, 0, 64], GRASS, true);
-        if plot {
-            volume(&mut t, [-64, 0, -64], [-32, 2, 64], GRASS, true);
-            volume(&mut t, [32, 0, -64], [64, 2, 64], GRASS, true);
-            volume(&mut t, [-32, 0, -64], [-8, 2, 0], GRASS, true);
-            volume(&mut t, [8, 0, -64], [32, 2, 0], GRASS, true);
-            // A house and its path replace the reserved topsoil; no coplanar overlay.
-            t.sockets.push(socket(
-                "house",
-                "plot-house",
-                [0, 0, 32],
-                up(),
-                "house-64",
-                true,
-            ));
-        } else {
-            volume(&mut t, [-64, 0, -64], [64, 2, 64], GRASS, true);
-            for (n, p) in [[-40, 2, -40], [40, 2, 40]].into_iter().enumerate() {
-                t.sockets.push(socket(
-                    &format!("plant-{n}"),
-                    "plant",
-                    p,
-                    up(),
-                    "tree",
-                    false,
-                ));
-            }
-        }
-    } else {
-        let edges = [-64, -32, 32, 64];
-        for z in 0..3 {
-            for x in 0..3 {
-                let asphalt = (x == 1 && z == 1)
-                    || (x == 1 && z == 0 && mask & 1 != 0)
-                    || (x == 2 && z == 1 && mask & 2 != 0)
-                    || (x == 1 && z == 2 && mask & 4 != 0)
-                    || (x == 0 && z == 1 && mask & 8 != 0);
-                volume(
-                    &mut t,
-                    [edges[x], -4, edges[z]],
-                    [edges[x + 1], if asphalt { 0 } else { 2 }, edges[z + 1]],
-                    if asphalt { ROAD } else { PAVE },
-                    true,
-                );
-            }
-        }
-        // Dashed centre lines stop before intersection centres; corner uses an L marking.
-        for arm in 0..4 {
-            if mask & (1 << arm) == 0 {
-                continue;
-            }
-            for z in [-60, -44] {
-                let mut v = piece(0, "", "unused");
-                volume(
-                    &mut v,
-                    [-1, -1, z],
-                    [1, 0, z + 8],
-                    [0.96, 0.88, 0.54],
-                    false,
-                );
-                for b in v.voxels {
-                    let r = Quat::from_array(yaw(4 - arm));
-                    let a = r * Vec3::from_array(b.min.map(|v| v as f32));
-                    let c = r * Vec3::from_array(b.max.map(|v| v as f32));
-                    volume(
-                        &mut t,
-                        a.min(c).round().to_array().map(|v| v as i32),
-                        a.max(c).round().to_array().map(|v| v as i32),
-                        b.color,
-                        false,
-                    );
-                }
-            }
-        }
-        if mask == 5 {
-            for z in [-28, -12, 4, 20] {
-                volume(
-                    &mut t,
-                    [-1, -1, z],
-                    [1, 0, z + 8],
-                    [0.96, 0.88, 0.54],
-                    false,
-                );
-            }
-        }
-    }
-    for (n, p) in [[0, -2, -64], [64, -2, 0], [0, -2, 64], [-64, -2, 0]]
-        .into_iter()
-        .enumerate()
-    {
-        let r = Quat::from_array(yaw(((6 - n) % 4) as u8));
-        let road = mask & (1 << n) != 0;
-        t.sockets.push(socket(
-            &format!("edge-{n}"),
-            if road {
-                "road"
-            } else if plot && n == 0 {
-                "frontage"
-            } else if mask != 0 {
-                "side-land"
-            } else {
-                "land"
-            },
-            p,
-            r,
-            if road { "road-128" } else { "land-128" },
-            road || plot && n == 0,
-        ));
-        if mask != 0 && !road {
-            t.sockets.push(socket(
-                &format!("access-{n}"),
-                "sidewalk",
-                [p[0], 2, p[2]],
-                r,
-                "path-16",
-                false,
-            ));
-        }
-    }
-    t
-}
+pub use kit::CELL;
+const CELL_SIZE: f32 = 12.8;
+
 pub fn starter_tiles(first: u32) -> (Vec<Tile>, SocketRules) {
-    let mut ts = vec![
-        terrain(first, "Grass", 0, false),
-        terrain(first + 1, "House plot", 0, true),
-        terrain(first + 2, "Road straight", 5, false),
-        terrain(first + 3, "Road corner", 3, false),
-        terrain(first + 4, "Road T", 11, false),
-        terrain(first + 5, "Road crossing", 15, false),
-    ];
-    let mut straight = piece(first + 6, "Walkway straight", "walkway");
-    volume(&mut straight, [-8, -2, 0], [8, 0, 16], PAVE, true);
-    straight.sockets = vec![
-        socket(
-            "start",
-            "path",
-            [0, 0, 0],
-            Quat::from_rotation_y(std::f32::consts::PI),
-            "path-16",
-            true,
-        ),
-        socket("end", "path", [0, 0, 16], Quat::IDENTITY, "path-16", true),
-    ];
-    ts.push(straight);
-    let mut corner = piece(first + 7, "Walkway corner", "walkway");
-    volume(&mut corner, [-8, -2, 0], [8, 0, 16], PAVE, true);
-    corner.sockets = vec![
-        socket(
-            "start",
-            "path",
-            [0, 0, 0],
-            Quat::from_rotation_y(std::f32::consts::PI),
-            "path-16",
-            true,
-        ),
-        socket(
-            "end",
-            "path",
-            [8, 0, 8],
-            Quat::from_rotation_y(std::f32::consts::FRAC_PI_2),
-            "path-16",
-            true,
-        ),
-    ];
-    ts.push(corner);
-    let mut floor = piece(first + 8, "House floor", "floor");
-    volume(
-        &mut floor,
-        [-32, 0, -32],
-        [32, 2, 32],
-        [0.63, 0.43, 0.26],
-        true,
-    );
-    floor.sockets.push(socket(
-        "ridge",
-        "ridge-mount",
-        [0, 60, 0],
-        up(),
-        "ridge-64",
-        true,
-    ));
-    floor.sockets.push(socket(
-        "base",
-        "house-base",
-        [0, 0, 0],
-        down(),
-        "house-64",
-        true,
-    ));
-    for (n, p) in [[0, 2, -32], [32, 2, 0], [0, 2, 32], [-32, 2, 0]]
-        .into_iter()
-        .enumerate()
-    {
-        floor.sockets.push(socket(
-            &format!("wall-{n}"),
-            if n == 0 {
-                "floor-door"
-            } else if n % 2 == 1 {
-                "floor-side"
-            } else {
-                "floor-wall"
-            },
-            p,
-            Quat::from_array(yaw(((4 - n) % 4) as u8)) * up(),
-            "wall-64",
-            true,
-        ));
+    let mut ts = kit::tiles();
+    for (n, t) in ts.iter_mut().enumerate() {
+        t.id = first + n as u32;
     }
-    ts.push(floor);
-    for (offset, name, category, kind) in [
-        (9, "Front door", "door", "door-base"),
-        (10, "Wall window", "wall", "wall-base"),
-        (11, "Side wall", "wall", "side-base"),
-    ] {
-        let mut w = piece(first + offset, name, category);
-        let half = if offset == 11 { 30 } else { 32 };
-        if offset == 9 {
-            volume(&mut w, [-half, 0, 0], [-9, 42, 2], WALL, true);
-            volume(&mut w, [9, 0, 0], [half, 42, 2], WALL, true);
-            volume(&mut w, [-9, 36, 0], [9, 42, 2], WALL, true);
-            w.sockets.push(socket(
-                "entrance",
-                "door",
-                [0, 0, 0],
-                Quat::from_rotation_y(std::f32::consts::PI),
-                "path-16",
-                true,
-            ));
-        } else {
-            volume(&mut w, [-half, 0, 0], [half, 42, 2], WALL, true);
-            volume(&mut w, [-10, 16, 0], [10, 30, 1], [0.28, 0.59, 0.69], false);
-        }
-        w.sockets
-            .push(socket("base", kind, [0, 0, 0], down(), "wall-64", true));
-        w.sockets.push(socket(
-            "roof",
-            if offset == 11 {
-                "wall-slope"
-            } else {
-                "wall-gable"
-            },
-            [0, 42, 0],
-            up(),
-            "roof-64",
-            true,
-        ));
-        ts.push(w);
-    }
-    let mut slope = piece(first + 12, "Roof slope", "roof");
-    for z in (0..32).step_by(2) {
-        volume(
-            &mut slope,
-            [-32, z / 2, z],
-            [32, z / 2 + 1, z + 2],
-            ROOF,
-            true,
-        );
-    }
-    slope.sockets.push(socket(
-        "base",
-        "roof-slope",
-        [0, 0, 0],
-        down(),
-        "roof-64",
-        true,
-    ));
-    ts.push(slope);
-    let mut gable = piece(first + 13, "Roof gable", "roof");
-    for x in (-30i32..30).step_by(2) {
-        let height = (32 - x.abs().max((x + 2).abs())) / 2;
-        volume(&mut gable, [x, 0, 0], [x + 2, height, 2], WALL, true);
-    }
-    gable.sockets.push(socket(
-        "base",
-        "roof-gable",
-        [0, 0, 0],
-        down(),
-        "roof-64",
-        true,
-    ));
-    ts.push(gable);
-    let mut trunk = piece(first + 14, "Tree trunk", "tree");
-    volume(
-        &mut trunk,
-        [-3, 0, -3],
-        [3, 16, 3],
-        [0.35, 0.23, 0.13],
-        true,
-    );
-    trunk.sockets = vec![
-        socket("base", "trunk-base", [0, 0, 0], down(), "tree", true),
-        socket("top", "trunk-top", [0, 16, 0], up(), "tree", true),
-        socket(
-            "branch",
-            "branch-mount",
-            [3, 12, 0],
-            Quat::from_rotation_y(std::f32::consts::FRAC_PI_2),
-            "branch",
-            false,
-        ),
-    ];
-    ts.push(trunk);
-    let mut branch = piece(first + 15, "Tree branch", "tree");
-    volume(
-        &mut branch,
-        [0, 0, -2],
-        [12, 4, 2],
-        [0.35, 0.23, 0.13],
-        true,
-    );
-    branch.sockets = vec![
-        socket(
-            "base",
-            "branch-base",
-            [0, 0, 0],
-            Quat::from_rotation_y(-std::f32::consts::FRAC_PI_2),
-            "branch",
-            true,
-        ),
-        socket("tip", "trunk-top", [10, 4, 0], up(), "tree", true),
-    ];
-    ts.push(branch);
-    let mut leaves = piece(first + 16, "Tree foliage", "tree");
-    volume(
-        &mut leaves,
-        [-10, 0, -10],
-        [10, 12, 10],
-        [0.20, 0.42, 0.16],
-        false,
-    );
-    volume(
-        &mut leaves,
-        [-7, 12, -7],
-        [7, 17, 7],
-        [0.28, 0.49, 0.19],
-        false,
-    );
-    leaves
-        .sockets
-        .push(socket("base", "leaf-base", [0, 0, 0], down(), "tree", true));
-    ts.push(leaves);
-    let mut ridge = piece(first + 17, "Roof ridge", "roof");
-    volume(&mut ridge, [-1, 0, -32], [1, 2, 32], ROOF, true);
-    ridge.sockets.push(socket(
-        "base",
-        "ridge-base",
-        [0, 0, 0],
-        down(),
-        "ridge-64",
-        true,
-    ));
-    ts.push(ridge);
-    let pairs = [
-        ("ridge-mount", "ridge-base"),
-        ("road", "road"),
-        ("land", "land"),
-        ("land", "side-land"),
-        ("side-land", "side-land"),
-        ("frontage", "side-land"),
-        ("plot-house", "house-base"),
-        ("floor-door", "door-base"),
-        ("floor-wall", "wall-base"),
-        ("floor-side", "side-base"),
-        ("wall-slope", "roof-slope"),
-        ("wall-gable", "roof-gable"),
-        ("path", "path"),
-        ("door", "path"),
-        ("sidewalk", "path"),
-        ("plant", "trunk-base"),
-        ("trunk-top", "trunk-base"),
-        ("trunk-top", "leaf-base"),
-        ("branch-mount", "branch-base"),
-    ];
-    (
-        ts,
-        SocketRules {
-            pairs: pairs
-                .into_iter()
-                .map(|(a, b)| [a.into(), b.into()])
-                .collect(),
-        },
-    )
+    (ts, kit::rules())
 }
+
 #[derive(Clone, Debug)]
 pub struct GenerateOptions {
     pub seed: u64,
     pub width: usize,
     pub depth: usize,
+    /// Number of building lots (houses, shops and the odd chapel).
     pub houses: usize,
+    /// Planting and street-furniture density.
     pub plant_percent: u8,
 }
 impl Default for GenerateOptions {
@@ -453,54 +43,557 @@ impl Default for GenerateOptions {
         }
     }
 }
-struct Random(u64);
-impl Random {
-    fn next(&mut self) -> u64 {
-        self.0 = self.0.wrapping_add(0x9e3779b97f4a7c15);
-        let mut z = self.0;
-        z = (z ^ (z >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94d049bb133111eb);
-        z ^ (z >> 31)
+/// The sample workspace's neighbourhood.
+pub fn showcase() -> GenerateOptions {
+    GenerateOptions {
+        seed: 12,
+        width: 9,
+        depth: 9,
+        houses: 16,
+        plant_percent: 80,
     }
 }
-fn named<'a>(tiles: &'a [Tile], name: &str) -> Result<&'a Tile, String> {
-    tiles
-        .iter()
-        .find(|t| t.name == name)
-        .ok_or_else(|| format!("Starter library missing {name}"))
+
+const SIDES: [(i32, i32); 4] = [(0, -1), (1, 0), (0, 1), (-1, 0)];
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Road {
+    Asphalt,
+    Lane,
 }
-fn attach(
-    w: &mut World,
-    ts: &[Tile],
-    rules: &SocketRules,
-    p: Port,
-    name: &str,
-) -> Result<u32, String> {
-    let t = named(ts, name)?;
-    let mut reason = String::new();
-    for (s, _) in t.sockets.iter().enumerate() {
-        for r in &t.rotations {
-            let i = aligned(w, ts, p, t, s, *r)?;
-            if !compatible(port(w, ts, p)?, (&i, &t.sockets[s]), rules) {
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Hill {
+    Top,
+    Spring,
+    Brook,
+    Edge,
+    Stairs,
+    Ramp,
+    Waterfall,
+    Corner,
+}
+#[derive(Clone, PartialEq, Eq, Debug)]
+enum Use {
+    Free,
+    Hill(Hill),
+    Road,
+    Stream,
+    Path,
+    Lot { front: usize, shop: bool },
+    Park(&'static str),
+}
+
+/// The cell plan before any tile is chosen.
+struct Plan {
+    w: usize,
+    d: usize,
+    high: Vec<bool>,
+    road: Vec<Option<Road>>,
+    stream: Vec<bool>,
+    uses: Vec<Use>,
+    /// Unordered neighbour pairs joined by water or footpath.
+    water: BTreeSet<(usize, usize)>,
+    paths: BTreeSet<(usize, usize)>,
+}
+impl Plan {
+    fn new(w: usize, d: usize) -> Self {
+        Self {
+            w,
+            d,
+            high: vec![false; w * d],
+            road: vec![None; w * d],
+            stream: vec![false; w * d],
+            uses: vec![Use::Free; w * d],
+            water: BTreeSet::new(),
+            paths: BTreeSet::new(),
+        }
+    }
+    fn at(&self, x: usize, z: usize) -> usize {
+        z * self.w + x
+    }
+    fn xz(&self, i: usize) -> (usize, usize) {
+        (i % self.w, i / self.w)
+    }
+    fn neighbour(&self, i: usize, side: usize) -> Option<usize> {
+        let (x, z) = self.xz(i);
+        let (dx, dz) = SIDES[side];
+        let (nx, nz) = (x as i32 + dx, z as i32 + dz);
+        (nx >= 0 && nz >= 0 && (nx as usize) < self.w && (nz as usize) < self.d)
+            .then(|| self.at(nx as usize, nz as usize))
+    }
+    fn link(set: &mut BTreeSet<(usize, usize)>, a: usize, b: usize) {
+        set.insert((a.min(b), a.max(b)));
+    }
+    fn linked(set: &BTreeSet<(usize, usize)>, a: usize, b: usize) -> bool {
+        set.contains(&(a.min(b), a.max(b)))
+    }
+    fn free(&self, i: usize) -> bool {
+        self.uses[i] == Use::Free
+    }
+    /// A low side faces a lower neighbour: the cliff drops on that side.
+    fn cliff(&self, i: usize, side: usize) -> bool {
+        self.high[i] && self.neighbour(i, side).is_some_and(|n| !self.high[n])
+    }
+    /// The edge kind the tile in cell `i` must present on world side `side`
+    /// ("*" on the world boundary).
+    fn edge(&self, i: usize, side: usize) -> &'static str {
+        let Some(n) = self.neighbour(i, side) else {
+            return "*";
+        };
+        if self.high[i] {
+            if self.high[n] {
+                if Plan::linked(&self.water, i, n) {
+                    return "brook";
+                }
+                let left = self.cliff(i, (side + 3) % 4);
+                let right = self.cliff(i, (side + 1) % 4);
+                return match (left, right) {
+                    (false, false) => "high",
+                    (true, false) => "cliff-l",
+                    (false, true) => "cliff-r",
+                    _ => "high-lr",
+                };
+            }
+            if Plan::linked(&self.water, i, n) {
+                return "stream";
+            }
+            if Plan::linked(&self.paths, i, n) {
+                return "path";
+            }
+            return "ground";
+        }
+        if Plan::linked(&self.water, i, n) {
+            return "stream";
+        }
+        if let Some(r) = self.road[i] {
+            return match self.road[n] {
+                Some(o) if r == Road::Lane || o == Road::Lane => "lane",
+                Some(_) => "road",
+                None => "curb",
+            };
+        }
+        if Plan::linked(&self.paths, i, n) {
+            return "path";
+        }
+        if let Use::Lot { front, .. } = self.uses[i]
+            && front == side
+        {
+            return "frontage";
+        }
+        "ground"
+    }
+    fn signature(&self, i: usize) -> [&'static str; 4] {
+        std::array::from_fn(|s| self.edge(i, s))
+    }
+    /// Mirror the plan so the hill sits in another corner.
+    fn mirrored(self, flip_x: bool, flip_z: bool) -> Self {
+        let (w, d) = (self.w, self.d);
+        let map = |i: usize| {
+            let (x, z) = (i % w, i / w);
+            let x = if flip_x { w - 1 - x } else { x };
+            let z = if flip_z { d - 1 - z } else { z };
+            z * w + x
+        };
+        let mut out = Plan::new(w, d);
+        for i in 0..w * d {
+            let j = map(i);
+            out.high[j] = self.high[i];
+            out.road[j] = self.road[i];
+            out.stream[j] = self.stream[i];
+            out.uses[j] = match &self.uses[i] {
+                Use::Lot { front, shop } => {
+                    let mut f = *front;
+                    if flip_x && f % 2 == 1 {
+                        f = 4 - f;
+                    }
+                    if flip_z && f % 2 == 0 {
+                        f = 2 - f;
+                    }
+                    Use::Lot {
+                        front: f,
+                        shop: *shop,
+                    }
+                }
+                u => u.clone(),
+            };
+        }
+        for &(a, b) in &self.water {
+            Plan::link(&mut out.water, map(a), map(b));
+        }
+        for &(a, b) in &self.paths {
+            Plan::link(&mut out.paths, map(a), map(b));
+        }
+        out
+    }
+}
+
+/// Plan the neighbourhood in a frame with the hill at the -X/-Z corner.
+fn plan(o: &GenerateOptions, rng: &mut Rng) -> Result<Plan, String> {
+    let (w, d) = (o.width, o.depth);
+    let mut p = Plan::new(w, d);
+    let pw = w.div_ceil(3).clamp(2, 4);
+    let pd = d.div_ceil(3).clamp(2, 4);
+    // Hill: spring and brook down column 0 to a waterfall, stairs on the
+    // east cliff, a ramp on the south cliff when wide enough.
+    for z in 0..pd {
+        for x in 0..pw {
+            let i = p.at(x, z);
+            p.high[i] = true;
+            let east = x == pw - 1;
+            let south = z == pd - 1;
+            p.uses[i] = Use::Hill(match (east, south) {
+                (true, true) => Hill::Corner,
+                (true, false) | (false, true) => Hill::Edge,
+                _ => Hill::Top,
+            });
+        }
+    }
+    for z in 0..pd {
+        let i = p.at(0, z);
+        p.uses[i] = Use::Hill(if z == 0 {
+            Hill::Spring
+        } else if z == pd - 1 {
+            Hill::Waterfall
+        } else {
+            Hill::Brook
+        });
+        if z > 0 {
+            let up = p.at(0, z - 1);
+            Plan::link(&mut p.water, up, i);
+        }
+    }
+    let stairs = p.at(pw - 1, 0);
+    p.uses[stairs] = Use::Hill(Hill::Stairs);
+    let ramp = if pw >= 3 {
+        Some((p.at(1, pd - 1), 2))
+    } else if pd >= 3 {
+        Some((p.at(pw - 1, 1), 1))
+    } else {
+        None
+    };
+    if let Some((r, _)) = ramp {
+        p.uses[r] = Use::Hill(Hill::Ramp);
+    }
+    // The stairs (and an east-facing ramp) land straight on the first street.
+    let foot = p.at(pw, 0);
+    Plan::link(&mut p.paths, stairs, foot);
+    if let Some((r, 1)) = ramp {
+        let (x, z) = p.xz(r);
+        let foot = p.at(x + 1, z);
+        Plan::link(&mut p.paths, r, foot);
+    }
+    // Road grid: columns east of the hill, rows south of it.
+    let columns: Vec<usize> = (pw..w).step_by(3).collect();
+    let rows: Vec<usize> = (pd + 1..d).step_by(3).collect();
+    let lane_row = (rows.len() >= 2 && columns.len() >= 2 && rng.chance(75))
+        .then(|| rows[1 + (rng.next_u64() % (rows.len() as u64 - 1)) as usize]);
+    for z in 0..d {
+        for &x in &columns {
+            let i = p.at(x, z);
+            p.road[i] = Some(Road::Asphalt);
+        }
+    }
+    for &z in &rows {
+        for x in 0..w {
+            let i = p.at(x, z);
+            if p.high[i] {
                 continue;
             }
-            let id = i.id;
-            let mut trial = w.clone();
-            let result = connect_instance(&mut trial, ts, rules, i);
-            if let Err(ref err) = result {
-                reason = err.clone();
-            }
-            if result.is_ok() {
-                *w = trial;
-                return Ok(id);
+            if Some(z) == lane_row {
+                if x > columns[0] && x < *columns.last().unwrap() && p.road[i].is_none() {
+                    p.road[i] = Some(Road::Lane);
+                }
+            } else if p.road[i].is_none() {
+                p.road[i] = Some(Road::Asphalt);
             }
         }
     }
-    Err(format!(
-        "Cannot attach {name} to {}:{}: {reason}",
-        p.instance, p.socket
-    ))
+    for i in 0..w * d {
+        if p.road[i].is_some() {
+            p.uses[i] = Use::Road;
+        }
+    }
+    // Stream: from the waterfall south, optionally stepping one column east.
+    let mut bends = (pd + 1..d.saturating_sub(1))
+        .filter(|z| !rows.contains(z) && !rows.contains(&(z + 1)))
+        .collect::<Vec<_>>();
+    let bend = if !bends.is_empty() && rng.chance(60) {
+        rng.shuffle(&mut bends);
+        Some(bends[0])
+    } else {
+        None
+    };
+    let mut prev = p.at(0, pd - 1);
+    let mut column = 0;
+    for z in pd..d {
+        let i = p.at(column, z);
+        p.stream[i] = true;
+        Plan::link(&mut p.water, prev, i);
+        if p.road[i].is_none() {
+            p.uses[i] = Use::Stream;
+        }
+        prev = i;
+        if Some(z) == bend {
+            let e = p.at(1, z);
+            p.stream[e] = true;
+            p.uses[e] = Use::Stream;
+            Plan::link(&mut p.water, i, e);
+            prev = e;
+            column = 1;
+        }
+    }
+    let stream_col = |z: usize| match bend {
+        Some(b) if z > b => 1,
+        _ => 0,
+    };
+    // Footpaths: the ramp down to the street, and a path across the stream.
+    if let Some((r, side)) = ramp
+        && side == 2
+    {
+        let (x, z) = p.xz(r);
+        let mut prev = r;
+        for zz in z + 1..d {
+            let i = p.at(x, zz);
+            if p.road[i].is_some() {
+                Plan::link(&mut p.paths, prev, i);
+                break;
+            }
+            if !p.free(i) {
+                return Err("Ramp path is blocked".into());
+            }
+            p.uses[i] = Use::Path;
+            Plan::link(&mut p.paths, prev, i);
+            prev = i;
+        }
+    }
+    let straight = |p: &Plan, i: usize| {
+        p.uses[i] == Use::Stream
+            && p.neighbour(i, 0)
+                .is_some_and(|n| Plan::linked(&p.water, i, n))
+            && p.neighbour(i, 2)
+                .is_none_or(|n| Plan::linked(&p.water, i, n))
+    };
+    let crossing_rows = (pd + 1..d)
+        .filter(|&z| {
+            let sc = stream_col(z);
+            !rows.contains(&z)
+                && Some(z) != bend
+                && straight(&p, p.at(sc, z))
+                && (0..columns[0]).all(|x| x == sc || p.free(p.at(x, z)))
+        })
+        .collect::<Vec<_>>();
+    if !crossing_rows.is_empty() {
+        let z = crossing_rows[(rng.next_u64() % crossing_rows.len() as u64) as usize];
+        let sc = stream_col(z);
+        let mut prev = p.at(columns[0], z);
+        for x in (0..columns[0]).rev() {
+            let i = p.at(x, z);
+            if x != sc {
+                p.uses[i] = Use::Path;
+            }
+            Plan::link(&mut p.paths, prev, i);
+            prev = i;
+        }
+    }
+    // Lots facing the streets; shops prefer the main street.
+    let main = rows.first().copied();
+    let mut candidates = vec![];
+    for i in 0..w * d {
+        if !p.free(i) || p.high[i] {
+            continue;
+        }
+        let fronts: Vec<usize> = (0..4)
+            .filter(|&s| {
+                p.neighbour(i, s)
+                    .is_some_and(|n| p.road[n].is_some() && !p.stream[n])
+            })
+            .collect();
+        if fronts.is_empty() {
+            continue;
+        }
+        let on_main = fronts.iter().any(|&s| {
+            let n = p.neighbour(i, s).unwrap();
+            Some(p.xz(n).1) == main && p.road[n] == Some(Road::Asphalt)
+        });
+        candidates.push((i, fronts, on_main));
+    }
+    rng.shuffle(&mut candidates);
+    if o.houses > candidates.len() {
+        return Err(format!(
+            "Could fit {} building lots facing a street; requested {}",
+            candidates.len(),
+            o.houses
+        ));
+    }
+    let shops_wanted = o.houses / 3;
+    candidates.sort_by_key(|c| !c.2);
+    let mut shops = 0;
+    for (i, fronts, on_main) in candidates.into_iter().take(o.houses) {
+        let shop = on_main && shops < shops_wanted;
+        shops += usize::from(shop);
+        // Face the main street when possible, otherwise any street.
+        let front = fronts
+            .iter()
+            .copied()
+            .find(|&s| {
+                let n = p.neighbour(i, s).unwrap();
+                Some(p.xz(n).1) == main
+            })
+            .unwrap_or(fronts[(rng.next_u64() % fronts.len() as u64) as usize]);
+        p.uses[i] = Use::Lot { front, shop };
+    }
+    // Parks fill the rest, with a few one-off features.
+    let mut parks = (0..w * d)
+        .filter(|&i| p.free(i) && !p.high[i])
+        .collect::<Vec<_>>();
+    rng.shuffle(&mut parks);
+    let mut specials = vec!["Pond", "Playground", "Community garden", "Fountain plaza"];
+    if w * d >= 64 {
+        specials.push("Pond");
+    }
+    rng.shuffle(&mut specials);
+    for i in parks {
+        let near_road = (0..4).any(|s| p.neighbour(i, s).is_some_and(|n| p.road[n].is_some()));
+        let pick = specials
+            .iter()
+            .position(|s| *s != "Fountain plaza" || near_road)
+            .filter(|_| rng.chance(70));
+        p.uses[i] = Use::Park(match pick {
+            Some(n) => specials.remove(n),
+            None if rng.chance(35) => "Wildflower meadow",
+            None => "Meadow",
+        });
+    }
+    let flip_x = rng.chance(50);
+    let flip_z = rng.chance(50);
+    Ok(p.mirrored(flip_x, flip_z))
 }
+
+/// Which tiles may fill a planned cell, in order of preference.
+fn cell_names(p: &Plan, i: usize, rng: &mut Rng) -> Vec<&'static str> {
+    match &p.uses[i] {
+        Use::Hill(h) => vec![match h {
+            Hill::Top => "Hill top",
+            Hill::Spring => "Hill spring",
+            Hill::Brook => "Hill brook",
+            Hill::Edge => "Cliff",
+            Hill::Stairs => "Cliff stairs",
+            Hill::Ramp => "Cliff ramp",
+            Hill::Waterfall => "Waterfall",
+            Hill::Corner => "Cliff corner",
+        }],
+        Use::Road if p.stream[i] => vec!["Road bridge"],
+        Use::Road => {
+            let mut v = vec![
+                "Road straight",
+                "Road corner",
+                "Road T",
+                "Road crossing",
+                "Lane straight",
+                "Lane corner",
+                "Lane T",
+                "Road T lane",
+                "Road lane crossing",
+            ];
+            if rng.chance(30) {
+                v.insert(0, "Road crosswalk");
+            }
+            v
+        }
+        Use::Stream if p.paths.iter().any(|&(a, b)| a == i || b == i) => vec!["Stream crossing"],
+        Use::Stream => vec!["Stream straight", "Stream bend"],
+        Use::Path => vec!["Path straight", "Path corner", "Path T", "Path end"],
+        Use::Lot { shop, .. } => vec![if *shop { "Shop lot" } else { "House lot" }],
+        Use::Park(name) => vec![name],
+        Use::Free => vec!["Meadow"],
+    }
+}
+
+/// World-side edge kinds of a tile instance (side index by facing).
+fn tile_edges(t: &Tile, rotation: [f32; 4]) -> [Option<&str>; 4] {
+    let mut out = [None; 4];
+    let i = Instance {
+        id: 0,
+        tile: t.id,
+        position: [0.; 3],
+        rotation,
+    };
+    for s in &t.sockets {
+        if !s.name.starts_with("edge-") {
+            continue;
+        }
+        let (_, r) = frame(&i, s);
+        let d = r * Vec3::Z;
+        let side = if d.z < -0.9 {
+            0
+        } else if d.x > 0.9 {
+            1
+        } else if d.z > 0.9 {
+            2
+        } else {
+            3
+        };
+        out[side] = Some(s.kind.as_str());
+    }
+    out
+}
+
+struct Kit<'a> {
+    tiles: &'a [Tile],
+    rules: &'a SocketRules,
+    by_name: BTreeMap<&'a str, &'a Tile>,
+    cache: Extents,
+}
+impl<'a> Kit<'a> {
+    fn new(tiles: &'a [Tile], rules: &'a SocketRules) -> Self {
+        Self {
+            tiles,
+            rules,
+            by_name: tiles.iter().map(|t| (t.name.as_str(), t)).collect(),
+            cache: Extents::default(),
+        }
+    }
+    fn named(&self, name: &str) -> Result<&'a Tile, String> {
+        self.by_name
+            .get(name)
+            .copied()
+            .ok_or_else(|| format!("Starter library missing {name}"))
+    }
+    fn place(&mut self, w: &mut World, i: Instance) -> Result<(), String> {
+        connect_with(w, self.tiles, self.rules, i, &mut self.cache)
+    }
+    /// Attach a named tile to an open socket, trying each compatible pose.
+    fn attach(&mut self, w: &mut World, p: Port, name: &str) -> Result<u32, String> {
+        let t = self.named(name)?;
+        let target = port(w, self.tiles, p)?;
+        let target = (target.0.clone(), target.1.clone());
+        let mut reason = String::from("no compatible socket");
+        for (s, socket) in t.sockets.iter().enumerate() {
+            for r in &t.rotations {
+                let i = aligned(w, self.tiles, p, t, s, *r)?;
+                if !compatible((&target.0, &target.1), (&i, socket), self.rules) {
+                    continue;
+                }
+                let id = i.id;
+                match self.place(w, i) {
+                    Ok(()) => return Ok(id),
+                    Err(e) => reason = e,
+                }
+            }
+        }
+        Err(format!(
+            "Cannot attach {name} to {}:{}: {reason}",
+            p.instance, p.socket
+        ))
+    }
+    /// Try names in order until one fits.
+    fn attach_any(&mut self, w: &mut World, p: Port, names: &[&str]) -> Option<(u32, String)> {
+        names
+            .iter()
+            .find_map(|n| self.attach(w, p, n).ok().map(|id| (id, n.to_string())))
+    }
+}
+
 fn find_port(w: &World, ts: &[Tile], id: u32, name: &str) -> Result<Port, String> {
     let i = w
         .instances
@@ -511,65 +604,205 @@ fn find_port(w: &World, ts: &[Tile], id: u32, name: &str) -> Result<Port, String
         .sockets
         .iter()
         .position(|s| s.name == name)
-        .ok_or("Missing named socket")?;
+        .ok_or_else(|| format!("Missing socket {name}"))?;
     Ok(Port {
         instance: id,
         socket,
     })
 }
-fn house(w: &mut World, ts: &[Tile], rules: &SocketRules, plot: u32) -> Result<(), String> {
-    let base = attach(
-        w,
-        ts,
-        rules,
-        find_port(w, ts, plot, "house")?,
-        "House floor",
-    )?;
-    attach(w, ts, rules, find_port(w, ts, base, "ridge")?, "Roof ridge")?;
-    for n in 0..4 {
-        let wall = attach(
+
+/// Weighted random order of names.
+fn weighted(rng: &mut Rng, items: &[(&'static str, u32)]) -> Vec<&'static str> {
+    let mut pool = items.to_vec();
+    let mut out = vec![];
+    while !pool.is_empty() {
+        let total: u32 = pool.iter().map(|i| i.1).sum();
+        let mut roll = (rng.next_u64() % u64::from(total.max(1))) as u32;
+        let n = pool
+            .iter()
+            .position(|i| {
+                if roll < i.1 {
+                    true
+                } else {
+                    roll -= i.1;
+                    false
+                }
+            })
+            .unwrap_or(0);
+        out.push(pool.remove(n).0);
+    }
+    out
+}
+
+const PARK_PLANTS: &[(&str, u32)] = &[
+    ("Oak tree", 6),
+    ("Round tree", 6),
+    ("Maple tree", 4),
+    ("Golden tree", 2),
+    ("Blossom tree", 3),
+    ("Birch tree", 2),
+    ("Poplar tree", 2),
+    ("Pine tree", 2),
+    ("Round bush", 4),
+    ("Big bush", 2),
+    ("Flowering bush", 3),
+    ("Hydrangea", 2),
+    ("Tulips", 2),
+    ("Lavender", 2),
+    ("Sunflowers", 1),
+    ("Tall grass", 1),
+    ("Mushrooms", 1),
+    ("Boulder", 1),
+    ("Rock cluster", 1),
+    ("Tree stump", 1),
+    ("Picnic table", 1),
+    ("Bench", 1),
+];
+const HILL_PLANTS: &[(&str, u32)] = &[
+    ("Pine tree", 6),
+    ("Birch tree", 4),
+    ("Oak tree", 3),
+    ("Golden tree", 2),
+    ("Maple tree", 2),
+    ("Boulder", 3),
+    ("Rock cluster", 2),
+    ("Tree stump", 1),
+    ("Mushrooms", 1),
+    ("Tall grass", 2),
+    ("Big bush", 1),
+];
+const BANK_PLANTS: &[(&str, u32)] = &[
+    ("Birch tree", 3),
+    ("Poplar tree", 2),
+    ("Round bush", 3),
+    ("Tall grass", 3),
+    ("Boulder", 2),
+    ("Stone", 2),
+    ("Blossom tree", 1),
+];
+const FRONT_YARD: &[(&str, u32)] = &[
+    ("Tulips", 3),
+    ("Lavender", 2),
+    ("Flower bed", 3),
+    ("Flowering bush", 3),
+    ("Round bush", 2),
+    ("Hydrangea", 2),
+    ("Sunflowers", 1),
+];
+const SIDE_YARD: &[(&str, u32)] = &[
+    ("Round bush", 3),
+    ("Big bush", 2),
+    ("Flowering bush", 2),
+    ("Hydrangea", 2),
+    ("Poplar tree", 2),
+    ("Birch tree", 1),
+];
+const BACK_YARD: &[(&str, u32)] = &[
+    ("Apple tree", 4),
+    ("Round tree", 3),
+    ("Blossom tree", 3),
+    ("Vegetable patch", 4),
+    ("Garden shed", 2),
+    ("Maple tree", 2),
+    ("Picnic table", 1),
+    ("Flowering bush", 1),
+];
+
+/// Choose a building for a lot and stack it to completion.
+fn build(
+    k: &mut Kit,
+    w: &mut World,
+    rng: &mut Rng,
+    lot: u32,
+    shop: bool,
+    chapel: &mut bool,
+) -> Result<(), String> {
+    let site = find_port(w, k.tiles, lot, "building")?;
+    if shop {
+        if !*chapel && rng.chance(25) {
+            k.attach(w, site, "Chapel")?;
+            *chapel = true;
+            return Ok(());
+        }
+        let ground = *rng.pick(&["Corner shop", "Cafe", "Florist", "Apartment lobby"]);
+        let mut top = k.attach(w, site, ground)?;
+        let style = *rng.pick(&["Brick storey", "Pink storey", "Cream storey", "Mint storey"]);
+        for _ in 0..rng.range(1, 4) {
+            let p = find_port(w, k.tiles, top, "top")?;
+            top = k.attach(w, p, style)?;
+        }
+        let p = find_port(w, k.tiles, top, "top")?;
+        k.attach(
             w,
-            ts,
-            rules,
-            find_port(w, ts, base, &format!("wall-{n}"))?,
-            if n == 0 {
-                "Front door"
-            } else if n % 2 == 1 {
-                "Side wall"
+            p,
+            if rng.chance(35) {
+                "Roof garden"
             } else {
-                "Wall window"
+                "Flat roof"
             },
         )?;
-        attach(
-            w,
-            ts,
-            rules,
-            find_port(w, ts, wall, "roof")?,
-            if n % 2 == 1 {
-                "Roof slope"
-            } else {
-                "Roof gable"
-            },
+        // Cafe tables out front, planters and bins elsewhere.
+        let lot_tile = tile(
+            k.tiles,
+            w.instances.iter().find(|i| i.id == lot).unwrap().tile,
         )?;
-        if n == 0 {
-            let mut p = find_port(w, ts, wall, "entrance")?;
-            for _ in 0..4 {
-                let path = attach(w, ts, rules, p, "Walkway straight")?;
-                let i = w.instances.iter().find(|i| i.id == path).unwrap();
-                p = (0..tile(ts, i.tile)?.sockets.len())
-                    .map(|socket| Port {
-                        instance: path,
-                        socket,
-                    })
-                    .find(|p| !w.connected(*p))
-                    .unwrap_or(p);
+        let sockets: Vec<(usize, i32)> = lot_tile
+            .sockets
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| s.kind == "street")
+            .map(|(n, s)| (n, s.position[2]))
+            .collect();
+        for (n, z) in sockets {
+            let p = Port {
+                instance: lot,
+                socket: n,
+            };
+            let names: &[&str] = if z < 0 {
+                &["Litter bin"]
+            } else if ground == "Cafe" {
+                &["Cafe table"]
+            } else {
+                &["Planter", "Bench", "Litter bin"]
+            };
+            if rng.chance(75) {
+                let mut names = names.to_vec();
+                rng.shuffle(&mut names);
+                k.attach_any(w, p, &names);
+            }
+        }
+    } else {
+        let colour = *rng.pick(&kit::HOUSE_COLOURS);
+        let mut top = k.attach(w, site, &format!("House ground floor ({colour})"))?;
+        if rng.chance(55) {
+            let p = find_port(w, k.tiles, top, "top")?;
+            top = k.attach(w, p, &format!("House upper floor ({colour})"))?;
+        }
+        let p = find_port(w, k.tiles, top, "top")?;
+        let roof = *rng.pick(&[
+            "Gable roof (red)",
+            "Gable roof (slate)",
+            "Hip roof (terracotta)",
+            "Hip roof (green)",
+        ]);
+        k.attach(w, p, roof)?;
+        if rng.chance(70) {
+            let fence = *rng.pick(&[
+                "Picket fence",
+                "Wooden fence",
+                "Low hedge",
+                "Stone wall",
+                "Iron railing",
+            ]);
+            for n in 0..6 {
+                let p = find_port(w, k.tiles, lot, &format!("fence-{n}"))?;
+                let _ = k.attach(w, p, fence);
             }
         }
     }
     Ok(())
 }
-/// A bounded backtracking road solver. Fixed perimeter and central streets guarantee a connected demonstration network;
-/// compatible rotated candidates are selected by constraints, with explicit boundary exits.
+
 pub fn generate(
     ts: &[Tile],
     rules: &SocketRules,
@@ -579,267 +812,223 @@ pub fn generate(
     if !(5..=11).contains(&o.width) || !(5..=11).contains(&o.depth) || o.plant_percent > 100 {
         return Err("World dimensions must be 5..11; plant percentage 0..100".into());
     }
-    let mut rng = Random(o.seed);
+    let mut rng = Rng::new(o.seed.wrapping_mul(0x2545_f491_4f6c_dd1d) ^ 0x5eed);
+    let p = plan(o, &mut rng)?;
+    let mut k = Kit::new(ts, rules);
     let mut w = World::empty(id);
     w.name = "Neighbourhood".into();
     w.seed = o.seed;
+    let half = CELL_SIZE / 2.;
     w.bounds = Bounds {
-        min: [-6.4, -2., -6.4],
+        min: [-half, -2., -half],
         max: [
-            o.width as f32 * 12.8 - 6.4,
-            20.,
-            o.depth as f32 * 12.8 - 6.4,
+            o.width as f32 * CELL_SIZE - half,
+            24.,
+            o.depth as f32 * CELL_SIZE - half,
         ],
     };
-    w.spawn = [12.8, 0., 12.8];
-    let mut masks = BTreeMap::new();
-    let road = |x: usize, z: usize| {
-        x == 1 || x == o.width - 2 || z == 1 || z == o.depth - 2 || x == o.width / 2
-    };
-    for z in 0..o.depth {
-        for x in 0..o.width {
-            let mut mask = 0u8;
-            if road(x, z) {
-                for (n, (dx, dz)) in [(0, -1), (1, 0), (0, 1), (-1, 0)].into_iter().enumerate() {
-                    let nx = x as i32 + dx;
-                    let nz = z as i32 + dz;
-                    if nx < 0
-                        || nz < 0
-                        || nx >= o.width as i32
-                        || nz >= o.depth as i32
-                        || road(nx as usize, nz as usize)
-                    {
-                        mask |= 1 << n;
-                    }
-                }
+    // Terrain: one matching tile per planned cell.
+    let mut cells = vec![0u32; o.width * o.depth];
+    for (i, cell) in cells.iter_mut().enumerate() {
+        let (x, z) = p.xz(i);
+        let want = p.signature(i);
+        let mut placed = false;
+        for name in cell_names(&p, i, &mut rng) {
+            let t = k.named(name)?;
+            let mut fits: Vec<[f32; 4]> = t
+                .rotations
+                .iter()
+                .copied()
+                .filter(|r| {
+                    tile_edges(t, *r)
+                        .iter()
+                        .zip(want)
+                        .all(|(have, want)| want == "*" || *have == Some(want))
+                })
+                .collect();
+            if fits.is_empty() {
+                continue;
             }
-            masks.insert((x, z), mask);
-        }
-    }
-    // Replace peripheral through streets by closed corners along an inset rectangular loop.
-    for z in 0..o.depth {
-        for x in 0..o.width {
-            if x == 0 || z == 0 || x == o.width - 1 || z == o.depth - 1 {
-                masks.insert((x, z), 0);
-            }
-        }
-    }
-    for z in 1..o.depth - 1 {
-        for x in 1..o.width - 1 {
-            let mut mask = 0;
-            if road(x, z) {
-                for (n, (dx, dz)) in [(0, -1), (1, 0), (0, 1), (-1, 0)].into_iter().enumerate() {
-                    let nx = (x as i32 + dx) as usize;
-                    let nz = (z as i32 + dz) as usize;
-                    if masks[&(nx, nz)] != 0 {
-                        mask |= 1 << n;
-                    }
-                }
-            }
-            masks.insert((x, z), mask);
-        }
-    }
-    // One central cross street supplies four-way intersections when width permits.
-    if o.depth >= 7 {
-        let z = o.depth / 2;
-        for x in 1..o.width - 1 {
-            masks.insert((x, z), 10);
-        }
-        for zz in 1..o.depth - 1 {
-            for x in 1..o.width - 1 {
-                if masks[&(x, zz)] == 0 {
-                    continue;
-                }
-                let mut m = 0;
-                for (n, (dx, dz)) in [(0, -1), (1, 0), (0, 1), (-1, 0)].into_iter().enumerate() {
-                    if masks[&((x as i32 + dx) as usize, (zz as i32 + dz) as usize)] != 0 {
-                        m |= 1 << n;
-                    }
-                }
-                masks.insert((x, zz), m);
-            }
-        }
-    }
-    let mut slots = vec![];
-    for (&(x, z), &mask) in &masks {
-        let mut candidates = vec![];
-        for t in ts.iter().filter(|t| {
-            t.category == "terrain"
-                && !t.voxels.is_empty()
-                && t.sockets
-                    .iter()
-                    .filter(|s| s.profile == "land-128" || s.profile == "road-128")
-                    .count()
-                    == 4
-        }) {
-            for r in &t.rotations {
-                let i = Instance {
-                    id: 0,
-                    tile: t.id,
-                    position: [x as f32 * 12.8, 0., z as f32 * 12.8],
-                    rotation: *r,
-                };
-                let mut found = 0;
-                for s in &t.sockets {
-                    if s.kind == "road" {
-                        let (_, r) = frame(&i, s);
-                        let d = r * Vec3::Z;
-                        let n = if d.z < -0.9 {
-                            0
-                        } else if d.x > 0.9 {
-                            1
-                        } else if d.z > 0.9 {
-                            2
-                        } else {
-                            3
-                        };
-                        found |= 1 << n;
-                    }
-                }
-                if found == mask {
-                    candidates.push(i);
-                }
-            }
-        }
-        if candidates.is_empty() {
-            return Err(format!("No terrain candidate for road mask {mask}"));
-        }
-        let shift = rng.next() as usize % candidates.len();
-        candidates.rotate_left(shift);
-        slots.push(candidates);
-    }
-    fn solve(
-        w: &mut World,
-        ts: &[Tile],
-        rules: &SocketRules,
-        slots: &[Vec<Instance>],
-        at: usize,
-        budget: &mut usize,
-    ) -> bool {
-        if at == slots.len() {
-            return true;
-        }
-        if *budget == 0 {
-            return false;
-        }
-        *budget -= 1;
-        for candidate in &slots[at] {
-            let mut trial = w.clone();
-            let mut i = candidate.clone();
-            i.id = trial.next_id();
-            if connect_instance(&mut trial, ts, rules, i).is_ok()
-                && solve(&mut trial, ts, rules, slots, at + 1, budget)
-            {
-                *w = trial;
-                return true;
-            }
-        }
-        false
-    }
-    if !solve(&mut w, ts, rules, &slots, 0, &mut 10000) {
-        return Err("Terrain constraints exhausted search budget".into());
-    }
-    let mut plots: Vec<_> = w
-        .instances
-        .iter()
-        .filter(|i| tile(ts, i.tile).is_ok_and(|t| t.name == "Grass"))
-        .map(|i| i.id)
-        .collect();
-    let shift = rng.next() as usize % plots.len();
-    plots.rotate_left(shift);
-    let mut houses = 0;
-    for id in plots {
-        if houses == o.houses {
+            rng.shuffle(&mut fits);
+            let instance = Instance {
+                id: w.next_id(),
+                tile: t.id,
+                position: [x as f32 * CELL_SIZE, 0., z as f32 * CELL_SIZE],
+                rotation: fits[0],
+            };
+            *cell = instance.id;
+            k.place(&mut w, instance)
+                .map_err(|e| format!("Cell {x},{z} ({name}): {e}"))?;
+            placed = true;
             break;
         }
-        let original = w.instances.iter().find(|i| i.id == id).unwrap().clone();
-        for r in &named(ts, "House plot")?.rotations {
-            let mut trial = w.clone();
-            trial.remove(id);
-            let mut plot = original.clone();
-            plot.tile = named(ts, "House plot")?.id;
-            plot.rotation = *r;
-            if connect_instance(&mut trial, ts, rules, plot).is_err() {
-                continue;
-            }
-            let p = find_port(&trial, ts, id, "edge-0")?;
-            if !trial.connected(p) {
-                continue;
-            }
-            let result = house(&mut trial, ts, rules, id);
-
-            if result.is_ok() {
-                w = trial;
-                houses += 1;
-                break;
-            }
+        if !placed {
+            return Err(format!("No tile fits cell {x},{z} with edges {want:?}"));
         }
     }
-    if houses != o.houses {
-        return Err(format!(
-            "Could fit {houses} houses with complete sidewalk paths; requested {}",
-            o.houses
-        ));
-    }
-    let plants: Vec<_> = w
-        .instances
-        .iter()
-        .flat_map(|i| {
-            tile(ts, i.tile)
-                .unwrap()
-                .sockets
-                .iter()
-                .enumerate()
-                .filter(|(_, s)| s.kind == "plant")
-                .map(move |(socket, _)| Port {
-                    instance: i.id,
-                    socket,
-                })
-        })
-        .collect();
-    for p in plants {
-        if rng.next() % 100 >= u64::from(o.plant_percent) {
-            continue;
+    // Required decorations: bridges at path crossings.
+    for &id in &cells {
+        if let Ok(p) = find_port(&w, ts, id, "crossing") {
+            let names = if rng.chance(70) {
+                ["Wooden footbridge", "Stepping stones"]
+            } else {
+                ["Stepping stones", "Wooden footbridge"]
+            };
+            k.attach_any(&mut w, p, &names)
+                .ok_or("Cannot bridge the stream crossing")?;
         }
-        let mut trial = w.clone();
-        let mut top = p;
-        let result = (|| -> Result<(), String> {
-            for level in 0..2 + rng.next() % 3 {
-                let trunk = attach(&mut trial, ts, rules, top, "Tree trunk")?;
-                if level > 0 && rng.next().is_multiple_of(2) {
-                    let branch_port = find_port(&trial, ts, trunk, "branch")?;
-                    let branch = attach(&mut trial, ts, rules, branch_port, "Tree branch")?;
-                    let tip = find_port(&trial, ts, branch, "tip")?;
-                    attach(&mut trial, ts, rules, tip, "Tree foliage")?;
+    }
+    // Buildings.
+    let mut chapel = false;
+    let mut lots = vec![];
+    for (i, &id) in cells.iter().enumerate() {
+        if let Use::Lot { shop, .. } = p.uses[i] {
+            lots.push((id, shop));
+        }
+    }
+    let mut order = lots.clone();
+    rng.shuffle(&mut order);
+    for (id, shop) in order {
+        build(&mut k, &mut w, &mut rng, id, shop, &mut chapel)?;
+    }
+    // Street furniture and planting, terrain cell by terrain cell.
+    let density = u64::from(o.plant_percent);
+    for &id in &cells {
+        let inst = w.instances.iter().find(|i| i.id == id).unwrap().clone();
+        let t = tile(ts, inst.tile)?;
+        for (n, s) in t.sockets.iter().enumerate() {
+            let port = Port {
+                instance: id,
+                socket: n,
+            };
+            if w.connected(port) {
+                continue;
+            }
+            let names: Vec<&str> = match (s.kind.as_str(), t.category.as_str()) {
+                ("street", "road") if s.name.ends_with('a') || t.name == "Road bridge" => {
+                    if !rng.chance(80) {
+                        continue;
+                    }
+                    vec!["Street lamp"]
                 }
-                top = find_port(&trial, ts, trunk, "top")?;
-            }
-            attach(&mut trial, ts, rules, top, "Tree foliage")?;
-            Ok(())
-        })();
-        if result.is_ok() {
-            w = trial;
+                ("street", "road") => {
+                    if !rng.chance(density * 2 / 5) {
+                        continue;
+                    }
+                    let mut items = vec![
+                        ("Bench", 3),
+                        ("Litter bin", 3),
+                        ("Fire hydrant", 2),
+                        ("Post box", 1),
+                        ("Planter", 2),
+                    ];
+                    if t.name == "Road straight" {
+                        items.push(("Bus stop", 1));
+                    }
+                    weighted(&mut rng, &items)
+                }
+                ("street", "park" | "path") => {
+                    if !rng.chance(70) {
+                        continue;
+                    }
+                    vec!["Bench"]
+                }
+                ("plant", "road") => {
+                    if !rng.chance(density / 2) {
+                        continue;
+                    }
+                    vec!["Street tree"]
+                }
+                ("plant", "hill") => {
+                    if !rng.chance(density) {
+                        continue;
+                    }
+                    weighted(&mut rng, HILL_PLANTS)
+                }
+                ("plant", "water") => {
+                    if !rng.chance(density) {
+                        continue;
+                    }
+                    weighted(&mut rng, BANK_PLANTS)
+                }
+                ("plant", "lot") if t.name == "Shop lot" => {
+                    if !rng.chance(density) {
+                        continue;
+                    }
+                    vec!["Hydrangea", "Round bush", "Poplar tree"]
+                }
+                ("plant", "lot") => {
+                    if !rng.chance(density) {
+                        continue;
+                    }
+                    let z = s.position[2];
+                    weighted(
+                        &mut rng,
+                        if z > 40 {
+                            FRONT_YARD
+                        } else if z > -20 {
+                            SIDE_YARD
+                        } else {
+                            BACK_YARD
+                        },
+                    )
+                }
+                ("plant", _) if t.name == "Fountain plaza" => {
+                    vec!["Street tree", "Round tree", "Blossom tree"]
+                }
+                ("plant", _) => {
+                    if !rng.chance(density) {
+                        continue;
+                    }
+                    let mut items = PARK_PLANTS.to_vec();
+                    if t.name == "Meadow" || t.name == "Wildflower meadow" {
+                        items.push(("Gazebo", 1));
+                    }
+                    weighted(&mut rng, &items)
+                }
+                _ => continue,
+            };
+            let names: Vec<&str> = names.into_iter().take(5).collect();
+            k.attach_any(&mut w, port, &names);
         }
     }
-    if let Some(door) = w
+    // Roads leaving the map are explicit exits.
+    for i in &w.instances {
+        for (n, s) in tile(ts, i.tile)?.sockets.iter().enumerate() {
+            let port = Port {
+                instance: i.id,
+                socket: n,
+            };
+            if s.kind == "road" && !w.connected(port) {
+                w.exits.push(port);
+            }
+        }
+    }
+    // Spawn on the road in front of a house, facing its door.
+    let spawn = lots
+        .iter()
+        .filter(|(_, shop)| !shop)
+        .chain(lots.iter())
+        .find_map(|(id, _)| {
+            let lot = w.instances.iter().find(|i| i.id == *id)?;
+            let out = Quat::from_array(lot.rotation) * Vec3::Z;
+            let p = Vec3::from_array(lot.position) + out * (half + 4.2);
+            Some((Vec3::new(p.x, 0., p.z), out))
+        });
+    if let Some((p, out)) = spawn {
+        w.spawn = p.to_array();
+        w.spawn_yaw = out.x.atan2(out.z);
+    } else if let Some(i) = w
         .instances
         .iter()
-        .find(|i| tile(ts, i.tile).is_ok_and(|t| t.category == "door"))
+        .find(|i| tile(ts, i.tile).is_ok_and(|t| t.category == "road"))
     {
-        let s = tile(ts, door.tile)?
-            .sockets
-            .iter()
-            .find(|s| s.kind == "door")
-            .ok_or("Door has no entrance")?;
-        let (p, r) = frame(door, s);
-        let outward = r * Vec3::Z;
-        w.spawn = (p + outward * 10.2).to_array();
-        w.spawn[1] = 0.;
-        w.spawn_yaw = outward.x.atan2(outward.z);
+        w.spawn = [i.position[0], 0., i.position[2]];
     }
     validate_world(&w, ts, rules, true)?;
     Ok(w)
 }
+
 pub fn install(l: &mut Library) -> Result<(), String> {
     if !l.tiles.is_empty() {
         return Err(
@@ -849,103 +1038,152 @@ pub fn install(l: &mut Library) -> Result<(), String> {
     let (ts, rules) = starter_tiles(l.next_id());
     l.tiles = ts;
     l.socket_rules = rules;
-    let options = GenerateOptions {
-        width: 7,
-        depth: 7,
-        ..Default::default()
-    };
-    l.worlds
-        .push(generate(&l.tiles, &l.socket_rules, l.next_id(), &options)?);
+    l.worlds.push(generate(
+        &l.tiles,
+        &l.socket_rules,
+        l.next_id(),
+        &showcase(),
+    )?);
     l.validate()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn starter_world_contains_real_assets_and_complete_routes() {
-        let (ts, rules) = starter_tiles(100);
-        validate_tiles(&ts, &rules).unwrap();
-        for t in &ts {
-            assert!(!t.voxels.is_empty(), "{}", t.name);
-        }
-        let o = GenerateOptions {
+
+    fn small() -> GenerateOptions {
+        GenerateOptions {
             width: 7,
             depth: 7,
+            houses: 6,
             ..Default::default()
-        };
-        let w = generate(&ts, &rules, 200, &o).unwrap();
-        assert_eq!(w, generate(&ts, &rules, 200, &o).unwrap());
-        for name in [
-            "Grass",
-            "House plot",
-            "Road straight",
-            "Road corner",
-            "Road T",
-            "Road crossing",
-            "Front door",
-            "Roof slope",
-            "Roof gable",
-            "Roof ridge",
-            "Tree trunk",
-            "Tree branch",
-            "Tree foliage",
-        ] {
-            assert!(
-                w.instances
-                    .iter()
-                    .any(|i| tile(&ts, i.tile).unwrap().name == name),
-                "{name}"
-            );
         }
-        assert_eq!(
-            w.instances
-                .iter()
-                .filter(|i| tile(&ts, i.tile).unwrap().category == "door")
-                .count(),
-            o.houses
-        );
-        let path = w
-            .instances
-            .iter()
-            .find(|i| tile(&ts, i.tile).unwrap().category == "walkway")
-            .unwrap()
-            .id;
-        let mut broken = w.clone();
-        broken.remove(path);
-        assert!(validate_world(&broken, &ts, &rules, true).is_err());
-        let mut broken = w.clone();
-        broken.connections[0].b = broken.connections[0].a;
-        assert!(validate_world(&broken, &ts, &rules, false).is_err());
-        let mut overlapping = w.clone();
-        let mut copy = w.instances[0].clone();
-        copy.id = w.next_id();
-        overlapping.instances.push(copy);
-        assert!(validate_world(&overlapping, &ts, &rules, true).is_err());
-        let mut impossible = o.clone();
-        impossible.houses = 100;
-        assert!(generate(&ts, &rules, 200, &impossible).is_err());
     }
+    fn names(w: &World, ts: &[Tile]) -> BTreeSet<String> {
+        w.instances
+            .iter()
+            .map(|i| tile(ts, i.tile).unwrap().name.clone())
+            .collect()
+    }
+
     #[test]
-    fn different_seeds_and_sizes_remain_valid() {
+    fn kit_tiles_are_real_assets_that_fit_their_cells_and_rules() {
         let (ts, rules) = starter_tiles(100);
-        for (seed, size) in [(0, 5), (23, 6), (81, 8)] {
-            let options = GenerateOptions {
+        validate_tiles(&ts, &rules).unwrap();
+        let unique: BTreeSet<_> = ts.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(unique.len(), ts.len(), "tile names are unique");
+        for t in &ts {
+            assert!(!t.voxels.is_empty(), "{}", t.name);
+            for s in &t.sockets {
+                assert!(
+                    rules.pairs.iter().flatten().any(|k| *k == s.kind),
+                    "{} socket {} has no connection rule",
+                    t.name,
+                    s.name
+                );
+            }
+            // Terrain cells stay inside their footprint so neighbours never overlap.
+            if t.sockets.iter().any(|s| s.name == "edge-0") {
+                for b in t.occupied() {
+                    assert!(
+                        [0, 2]
+                            .iter()
+                            .all(|&a| b.min[a] >= -6.401 && b.max[a] <= 6.401)
+                            && b.min[1] >= -1.601,
+                        "{} reaches outside its cell: {:?}..{:?}",
+                        t.name,
+                        b.min,
+                        b.max
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn generation_is_deterministic_and_valid_across_seeds_and_sizes() {
+        let (ts, rules) = starter_tiles(100);
+        let w = generate(&ts, &rules, 200, &small()).unwrap();
+        assert_eq!(w, generate(&ts, &rules, 200, &small()).unwrap());
+        for (seed, size, houses) in [(0, 5, 2), (23, 6, 4), (81, 8, 8), (5, 11, 20), (8, 7, 3)] {
+            let o = GenerateOptions {
                 seed,
                 width: size,
                 depth: size,
-                houses: 2,
+                houses,
                 plant_percent: 30,
             };
-            let w = generate(&ts, &rules, 200, &options).unwrap();
+            let w = generate(&ts, &rules, 200, &o)
+                .unwrap_or_else(|e| panic!("seed {seed} size {size}: {e}"));
             validate_world(&w, &ts, &rules, true).unwrap();
+            let lots = w
+                .instances
+                .iter()
+                .filter(|i| tile(&ts, i.tile).unwrap().category == "lot")
+                .count();
+            assert_eq!(lots, houses, "seed {seed}");
         }
+        let impossible = GenerateOptions {
+            houses: 100,
+            ..small()
+        };
+        assert!(generate(&ts, &rules, 200, &impossible).is_err());
     }
+
     #[test]
-    fn rotated_corner_connections_and_mismatched_profiles() {
+    fn showcase_uses_the_whole_kit() {
         let (ts, rules) = starter_tiles(100);
-        let road = named(&ts, "Road straight").unwrap();
-        let corner = named(&ts, "Road corner").unwrap();
+        let w = generate(&ts, &rules, 200, &showcase()).unwrap();
+        let used = names(&w, &ts);
+        for name in [
+            "Hill top",
+            "Hill spring",
+            "Cliff",
+            "Cliff corner",
+            "Cliff stairs",
+            "Cliff ramp",
+            "Waterfall",
+            "Stream straight",
+            "Stream crossing",
+            "Road bridge",
+            "Road straight",
+            "Road crossing",
+            "Road T lane",
+            "Lane straight",
+            "House lot",
+            "Shop lot",
+            "Street lamp",
+        ] {
+            assert!(used.contains(name), "{name}");
+        }
+        let categories: BTreeSet<_> = w
+            .instances
+            .iter()
+            .map(|i| tile(&ts, i.tile).unwrap().category.as_str())
+            .collect();
+        for c in [
+            "building", "roof", "tree", "bush", "flowers", "fence", "street", "bridge", "park",
+            "path",
+        ] {
+            assert!(categories.contains(c), "{c}");
+        }
+        // Every lot carries a finished building.
+        for i in w.instances.iter() {
+            let t = tile(&ts, i.tile).unwrap();
+            if t.category == "lot" {
+                let p = find_port(&w, &ts, i.id, "building").unwrap();
+                assert!(w.connected(p), "lot {} has no building", i.id);
+            }
+        }
+        assert!(!w.exits.is_empty());
+    }
+
+    #[test]
+    fn road_pieces_connect_in_every_turn_and_profiles_must_match() {
+        let (ts, rules) = starter_tiles(100);
+        let mut k = Kit::new(&ts, &rules);
+        let road = k.named("Road straight").unwrap();
+        let corner = k.named("Road corner").unwrap();
         for turn in 0..4 {
             let mut w = World::empty(200);
             let i = Instance {
@@ -956,32 +1194,41 @@ mod tests {
             };
             connect_instance(&mut w, &ts, &rules, i).unwrap();
             let p = find_port(&w, &ts, 1, "edge-0").unwrap();
-            let id = attach(&mut w, &ts, &rules, p, "Road corner").unwrap();
+            let id = k.attach(&mut w, p, "Road corner").unwrap();
             assert!(w.connected(p));
             assert_eq!(
                 w.instances.iter().find(|i| i.id == id).unwrap().tile,
                 corner.id
             );
+            // A lot cannot face the carriageway.
+            let mut w = World::empty(200);
+            connect_instance(&mut w, &ts, &rules, w_instance(road.id, turn)).unwrap();
+            let p = find_port(&w, &ts, 1, "edge-0").unwrap();
+            assert!(k.attach(&mut w, p, "House lot").is_err());
         }
-        let mut other = road
+        let a = road
             .sockets
             .iter()
             .find(|s| s.kind == "road")
             .unwrap()
             .clone();
-        let a = other.clone();
+        let mut other = a.clone();
         other.rotation =
             (Quat::from_array(a.rotation) * Quat::from_rotation_y(std::f32::consts::PI)).to_array();
-        let i = Instance {
-            id: 1,
-            tile: road.id,
-            position: [0.; 3],
-            rotation: identity(),
-        };
+        let i = w_instance(road.id, 0);
         assert!(compatible((&i, &a), (&i, &other), &rules));
         other.profile = "road-64".into();
         assert!(!compatible((&i, &a), (&i, &other), &rules));
     }
+    fn w_instance(tile: u32, turn: u8) -> Instance {
+        Instance {
+            id: 1,
+            tile,
+            position: [0.; 3],
+            rotation: yaw(turn),
+        }
+    }
+
     #[test]
     fn complete_world_and_tile_documents_round_trip() {
         let mut l = Library::default();
@@ -993,99 +1240,14 @@ mod tests {
         assert_eq!(loaded.worlds, l.worlds);
         assert_eq!(loaded.socket_rules, l.socket_rules);
         std::fs::remove_dir_all(dir).unwrap();
-        let legacy: Library =
-            serde_json::from_str(r#"{"version":1,"bodies":[],"props":[],"characters":[]}"#)
-                .unwrap();
-        assert!(legacy.tiles.is_empty());
-        legacy.validate().unwrap();
-    }
-}
-
-#[cfg(test)]
-mod graph_regressions {
-    use super::*;
-    #[test]
-    fn rejects_closed_path_loops_and_sidewalk_to_sidewalk_routes() {
-        let (mut ts, rules) = starter_tiles(100);
-        let mut w = World::empty(200);
-        let corner = named(&ts, "Walkway corner").unwrap();
-        connect_instance(
-            &mut w,
-            &ts,
-            &rules,
-            Instance {
-                id: 1,
-                tile: corner.id,
-                position: [0., 0.2, 0.],
-                rotation: identity(),
-            },
-        )
-        .unwrap();
-        let mut last = 1;
-        for _ in 0..3 {
-            let p = find_port(&w, &ts, last, "end").unwrap();
-            last = attach(&mut w, &ts, &rules, p, "Walkway corner").unwrap();
-        }
-        assert_eq!(w.connections.len(), 4);
         assert!(
-            validate_world(&w, &ts, &rules, true)
-                .unwrap_err()
-                .contains("one door")
-        );
-        let world = generate(
-            &ts,
-            &rules,
-            200,
-            &GenerateOptions {
-                width: 7,
-                depth: 7,
-                plant_percent: 0,
-                ..Default::default()
-            },
-        )
-        .unwrap();
-        let door = ts.iter_mut().find(|t| t.category == "door").unwrap();
-        door.category = "terrain".into();
-        door.sockets
-            .iter_mut()
-            .find(|s| s.kind == "door")
-            .unwrap()
-            .kind = "sidewalk".into();
-        assert!(
-            validate_world(&world, &ts, &rules, true)
-                .unwrap_err()
-                .contains("one door")
+            install(&mut l).is_err(),
+            "an existing kit is never replaced"
         );
     }
-    #[test]
-    fn tilted_boxes_do_not_use_their_bounding_boxes_as_solid_geometry() {
-        let b = Bounds {
-            min: [-2., -0.1, -0.1],
-            max: [2., 0.1, 0.1],
-        };
-        let rotation = Quat::from_rotation_y(std::f32::consts::FRAC_PI_4).to_array();
-        let a = Instance {
-            id: 1,
-            tile: 1,
-            position: [0.; 3],
-            rotation,
-        };
-        let c = Instance {
-            id: 2,
-            tile: 1,
-            position: [0.5, 0., 0.5],
-            rotation,
-        };
-        assert!(intersects(&world_bounds(&a, &b), &world_bounds(&c, &b)));
-        assert!(!OrientedBox::new(&a, &b).overlaps(&OrientedBox::new(&c, &b)));
-    }
-}
 
-#[cfg(test)]
-mod traversal_regression {
-    use super::*;
     #[test]
-    fn sample_character_fits_the_generated_entrance_and_stops_at_back_wall() {
+    fn sample_character_walks_from_the_road_through_the_front_door_to_the_back_wall() {
         let library = crate::storage::load_workspace(std::path::Path::new(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/test_workspace"
@@ -1093,18 +1255,7 @@ mod traversal_regression {
         .unwrap();
         let (lo, hi) = library.bodies[0].bounds().unwrap();
         let (ts, rules) = starter_tiles(100);
-        let w = generate(
-            &ts,
-            &rules,
-            200,
-            &GenerateOptions {
-                width: 7,
-                depth: 7,
-                plant_percent: 0,
-                ..Default::default()
-            },
-        )
-        .unwrap();
+        let w = generate(&ts, &rules, 200, &small()).unwrap();
         let terrain = crate::terrain_collision::TerrainCollision::from_world(&w, &ts).unwrap();
         let start = Vec3::from_array(w.spawn);
         let mut player = crate::controller::PlayerController {
@@ -1116,7 +1267,9 @@ mod traversal_regression {
             speed: 2.6,
             ..default()
         };
-        for _ in 0..500 {
+        let forward = Quat::from_rotation_y(w.spawn_yaw) * -Vec3::Z;
+        let mut on_curb = false;
+        for _ in 0..600 {
             crate::terrain_collision::step_on_terrain(
                 &mut player,
                 &input,
@@ -1125,63 +1278,89 @@ mod traversal_regression {
                 &terrain,
                 hi.y - lo.y,
             );
+            let progress = (player.position - start).dot(forward);
+            on_curb |= (1.5..3.).contains(&progress) && (player.position.y - 0.2).abs() < 0.01;
         }
-        let forward = Quat::from_rotation_y(w.spawn_yaw) * -Vec3::Z;
         let progress = (player.position - start).dot(forward);
+        assert!(on_curb, "the walk climbs the curb onto the sidewalk");
         assert!(
-            progress > 14. && progress < 16.4,
+            progress > 12.2 && progress < 12.8,
             "Entrance/wall traversal stopped at {progress}, avatar height {}",
             hi.y - lo.y
         );
-        assert!((player.position.y - 0.2).abs() < 0.02);
+        assert!(
+            (player.position.y - 0.4).abs() < 0.02,
+            "inside on the house floor"
+        );
     }
 }
 
 #[cfg(test)]
-mod roof_regression {
+mod walkway_rules {
     use super::*;
+    /// The validator's walkway rule still holds for user-made walkway tiles.
     #[test]
-    fn gables_meet_the_underside_of_both_roof_slopes_without_voxel_gaps() {
-        let (ts, rules) = starter_tiles(100);
-        let w = generate(
-            &ts,
-            &rules,
-            200,
-            &GenerateOptions {
-                width: 7,
-                depth: 7,
-                plant_percent: 0,
-                ..Default::default()
+    fn closed_walkway_loops_are_rejected() {
+        let slab = Volume {
+            min: [-8, -2, 0],
+            max: [8, 0, 16],
+            color: [0.6; 3],
+        };
+        let corner = Tile {
+            id: 1,
+            name: "Walk".into(),
+            category: "walkway".into(),
+            voxels: vec![slab],
+            sockets: vec![
+                Socket {
+                    name: "start".into(),
+                    kind: "path".into(),
+                    position: [0, 0, 0],
+                    rotation: Quat::from_rotation_y(std::f32::consts::PI).to_array(),
+                    profile: "path-16".into(),
+                    required: true,
+                },
+                Socket {
+                    name: "end".into(),
+                    kind: "path".into(),
+                    position: [8, 0, 8],
+                    rotation: Quat::from_rotation_y(std::f32::consts::FRAC_PI_2).to_array(),
+                    profile: "path-16".into(),
+                    required: true,
+                },
+            ],
+            rotations: (0..4).map(yaw).collect(),
+            colliders: vec![Bounds {
+                min: [-0.8, -0.2, 0.],
+                max: [0.8, 0., 1.6],
+            }],
+        };
+        let ts = vec![corner];
+        let rules = SocketRules {
+            pairs: vec![["path".into(), "path".into()]],
+        };
+        let mut k = Kit::new(&ts, &rules);
+        let mut w = World::empty(9);
+        k.place(
+            &mut w,
+            Instance {
+                id: 1,
+                tile: 1,
+                position: [0., 0.2, 0.],
+                rotation: identity(),
             },
         )
         .unwrap();
-        let base = w
-            .instances
-            .iter()
-            .find(|i| tile(&ts, i.tile).unwrap().category == "floor")
-            .unwrap();
-        let collision = crate::terrain_collision::TerrainCollision::from_world(&w, &ts).unwrap();
-        for x in -32..32 {
-            for z in [-31.5, 31.5] {
-                let column: Vec<_> = (44..62)
-                    .map(|y| {
-                        let p = base.transform().transform_point(Vec3::new(
-                            (x as f32 + 0.5) * UNIT,
-                            (y as f32 + 0.5) * UNIT,
-                            z * UNIT,
-                        ));
-                        collision
-                            .boxes
-                            .iter()
-                            .any(|b| (0..3).all(|a| p[a] > b.min[a] && p[a] < b.max[a]))
-                    })
-                    .collect();
-                let top = column.iter().rposition(|v| *v).expect("Roof surface");
-                assert!(
-                    column[..=top].iter().all(|v| *v),
-                    "Roof gap at x={x}, z={z}"
-                );
-            }
+        let mut last = 1;
+        for _ in 0..3 {
+            let p = find_port(&w, &ts, last, "end").unwrap();
+            last = k.attach(&mut w, p, "Walk").unwrap();
         }
+        assert_eq!(w.connections.len(), 4);
+        assert!(
+            validate_world(&w, &ts, &rules, true)
+                .unwrap_err()
+                .contains("one door")
+        );
     }
 }

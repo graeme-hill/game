@@ -2,82 +2,29 @@
   "version": 1,
   "resource": {
     "pairs": [
-      [
-        "ridge-mount",
-        "ridge-base"
-      ],
-      [
-        "road",
-        "road"
-      ],
-      [
-        "land",
-        "land"
-      ],
-      [
-        "land",
-        "side-land"
-      ],
-      [
-        "side-land",
-        "side-land"
-      ],
-      [
-        "frontage",
-        "side-land"
-      ],
-      [
-        "plot-house",
-        "house-base"
-      ],
-      [
-        "floor-door",
-        "door-base"
-      ],
-      [
-        "floor-wall",
-        "wall-base"
-      ],
-      [
-        "floor-side",
-        "side-base"
-      ],
-      [
-        "wall-slope",
-        "roof-slope"
-      ],
-      [
-        "wall-gable",
-        "roof-gable"
-      ],
-      [
-        "path",
-        "path"
-      ],
-      [
-        "door",
-        "path"
-      ],
-      [
-        "sidewalk",
-        "path"
-      ],
-      [
-        "plant",
-        "trunk-base"
-      ],
-      [
-        "trunk-top",
-        "trunk-base"
-      ],
-      [
-        "trunk-top",
-        "leaf-base"
-      ],
-      [
-        "branch-mount",
-        "branch-base"
-      ]
+      ["road", "road"],
+      ["lane", "lane"],
+      ["curb", "curb"],
+      ["curb", "ground"],
+      ["curb", "path"],
+      ["curb", "frontage"],
+      ["ground", "ground"],
+      ["path", "path"],
+      ["stream", "stream"],
+      ["high", "high"],
+      ["cliff-l", "cliff-r"],
+      ["brook", "brook"],
+      ["lot-house", "house-base"],
+      ["house-top", "house-storey"],
+      ["house-top", "house-roof"],
+      ["lot-block", "block-base"],
+      ["block-top", "block-storey"],
+      ["block-top", "block-roof"],
+      ["plant", "plant-base"],
+      ["plant", "street-base"],
+      ["street", "street-base"],
+      ["fence", "fence-base"],
+      ["crossing", "bridge-base"]
     ]
   }
 }

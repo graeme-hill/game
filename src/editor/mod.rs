@@ -437,8 +437,8 @@ impl Editor {
             generator: GenSettings {
                 seed: 7,
                 size: 7,
-                houses: 3,
-                plants: 45,
+                houses: 8,
+                plants: 60,
             },
             placement: Placement::default(),
             rule_focus: None,

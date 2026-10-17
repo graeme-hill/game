@@ -69,7 +69,8 @@ recursive, validated workspace loader resolves these stable IDs in both modes;
 no special sample-only spawning code is needed. `library.json` mirrors the assets
 for legacy loading.
 A legacy workspace containing only `library.json` also loads; its first character
-uses array order. The sample also includes 18 voxel tiles and a generated neighbourhood with socket-connected roads, houses, entrance paths, and trees.
+uses array order. The sample also includes a 100-tile voxel kit and a generated
+"Neighbourhood" world (see [Tiles, sockets, and worlds](#tiles-sockets-and-worlds)).
 
 Startup is split into launch configuration, an editor plugin, and a game plugin.
 Both modes share document loading and body/attachment rendering. Game placement
@@ -276,13 +277,40 @@ It saves the workspace and preserves existing clips with those names.
 
 ## Tiles, sockets, and worlds
 
-`test_workspace/tiles/` contains **actual editable voxel source assets**: grass,
-house plots, straight/corner/T/crossing roads, straight/corner walkways, house
-floors, door/window/side walls, roof slopes/gables/ridges, and tree trunks,
-branches, and foliage. The saved neighbourhood is in `test_workspace/worlds/`.
-Roads are at Y=0; grass, sidewalks, entrance paths, and house floors are at Y=0.2.
-Plots reserve topsoil space for the house and entrance path, which fill that space
-when assembled. Door openings are clear; the starter kit has no animated doors.
+`test_workspace/tiles/` contains **actual editable voxel source assets**, drawn by
+`src/kit/` and grouped by category in the Explorer:
+
+- **Terrain cells** (12.8 × 12.8 units): asphalt roads (straight, crosswalk,
+  corner, T, crossing), a cobbled brick **lane** style with its own straight,
+  corner and T pieces plus road/lane junctions, a stone road **bridge**, streams
+  (straight, bend, and a path crossing that takes a footbridge), gravel
+  footpaths (straight, corner, T, lookout end), parks (meadow, wildflower meadow,
+  pond with a jetty, fountain plaza, community garden, playground), house and
+  shop **lots**, and a **hill**: hill top, cliff, cliff corner, cliff stairs,
+  a terraced grass ramp, a brook, a spring and a waterfall.
+- **Buildings** stack on lots through sockets: house ground floors and upper
+  floors in four colours with gable or hip roofs, and shop blocks (corner shop,
+  cafe, florist, apartment lobby) with brick, pink balcony, cream or mint
+  storeys and flat or garden roofs. A chapel is a single landmark piece.
+- **Nature and dressing**: oak, round, maple, golden, blossom, apple, pine,
+  birch, poplar and street trees; bushes; tulips, lavender, sunflowers, flower
+  beds, tall grass and mushrooms; boulders, stones, rock clusters and stumps;
+  vegetable patches, sheds and a gazebo; picket, wooden, hedge, stone and iron
+  fences; street lamps, benches, bins, hydrants, post boxes, planters, cafe
+  tables, picnic tables and a bus stop; a wooden footbridge and stepping stones.
+
+Scale follows the 1.565-unit character: one voxel is 0.1 units, lower ground is
+at Y=0.2 with roads at Y=0 (a 0.2 curb), streams sit at Y=-0.4 with shallow
+wadeable beds, and the hill top is 3.4 units up. House doors are 1.4 × 2.4 and
+open into a floor at Y=0.4. Stairs and ramps rise in 0.2 steps the character can
+climb. Cells carry `edge-0..3` sockets (−Z, +X, +Z, −X) whose type says what
+crosses the edge (`road`, `lane`, `curb`, `ground`, `path`, `stream`,
+`frontage`, `high`, `brook`, and the handed `cliff-l`/`cliff-r` for the sides of
+a cliff), so neighbouring cells only fit when roads, water, paths and cliffs line
+up. Decorations attach to upward `plant`, `street`, `fence` and lot sockets.
+Shops, trees and roofs are designed to read from a high RTS-style camera as well
+as the third-person view; the directional light casts shadows in game mode and
+the editor.
 
 ```sh
 nix develop --command cargo run --locked -- --mode editor --workspace test_workspace --editor-view tiles
@@ -311,8 +339,8 @@ a valid placement. An empty world starts by placing a chosen tile at the origin.
 All coincident sockets are checked and connected, and occupied volumes cannot
 intersect. **Complete piece** fills the selected piece's required sockets — and
 those of everything it adds — with fitting tiles (preferring tiles that need
-the least, varied by the generator seed): for example, a trunk planted on grass
-grows its branches and foliage. It is one undo step and changes nothing if a
+the least, varied by the generator seed): for example, a house ground floor
+placed on a lot gets its roof. It is one undo step and changes nothing if a
 required socket cannot be filled. **Remove**, Undo, Redo, Save, and Revert work on the graph.
 Incomplete worlds can be saved as drafts; **Validate** and **Play world**
 require a complete world. Play opens a separate game window. `--world ID`
@@ -320,39 +348,58 @@ selects a particular saved world's numeric ID.
 
 World storage is a spatial graph of piece instances and socket connections,
 not a tile array. Standard 12.8-unit terrain footprints and quarter-turn rotations
-are conventions of this starter kit. Smaller house and tree pieces use the same
-system. Local socket positions lie on the voxel lattice; socket frames and allowed
+are conventions of this starter kit. Buildings, trees and street furniture use
+the same system. Local socket positions lie on the voxel lattice; socket frames and allowed
 instance orientations use quaternions. Connection rules in `connections.sockets`
 are symmetric many-to-many type pairs, with exact profile and frame matching.
 Collision boxes remain separate from visual geometry; oriented occupancy checks
-also protect non-solid foliage. Meshing is chunked and cached across instances.
+also protect non-solid foliage; a per-tile broad phase keeps placement and
+validation fast in worlds with hundreds of pieces. Meshing is chunked and cached
+across instances.
 
 **Generate new world** uses the selected seed, dimensions (5–11 cells per side),
-house count, and planting percentage. The starter generator builds a connected
-street-loop layout, selects compatible rotated terrain candidates from metadata
-with bounded backtracking, assembles single-storey houses, and connects each door
-to a sidewalk. Failed plot/orientation choices are discarded. Optional planting
-sockets grow bounded trunk/branch/foliage assemblies. It reports impossible
-requests rather than publishing partial worlds. This is a starter construction
-recipe; additional layout/tree/house recipes can use the same graph and checks.
+number of building lots ("Houses"), and planting percentage. The generator plans
+a hill in a seeded corner (spring, brook and waterfall, stairs and a ramp down
+its cliffs), a stream running from the waterfall across the map (bridged where
+streets cross it, with a footpath and footbridge), a street grid with an
+optional brick lane, lots facing the streets (shops prefer the main street), and
+parks in the remaining cells. Each cell gets a tile and quarter turn whose edge
+sockets match the plan, placed through the ordinary socket and occupancy checks.
+Buildings are then stacked on lots, and fences, street furniture, trees, bushes,
+flowers and rocks fill decoration sockets, skipping anything that would overlap.
+It reports impossible requests (for example more lots than street frontage)
+rather than publishing partial worlds.
 
-Every completed walkway component must connect exactly one door and one sidewalk,
-with no branches, dangling ends, or isolated loops. Unused sidewalk access sockets
-are valid and do not create paths. Required house/roof/tree sockets must terminate
-in compatible pieces. Explicit road exits are allowed only on world boundaries.
-Saved worlds also require a supported character spawn.
+User-made `walkway` tiles keep their rule: every completed walkway component must
+connect exactly one door and one sidewalk, with no branches, dangling ends, or
+isolated loops. Required sockets must terminate in compatible pieces. Explicit
+road exits are allowed only on world boundaries. Saved worlds also require a
+supported character spawn; the generator spawns the character on the road in
+front of a house, facing its door.
 
-To create the kit in a character workspace that has no tiles, or generate an
-additional world from an existing kit:
+To create the kit and the sample neighbourhood (9 × 9 cells, 16 lots) in a
+workspace that has no tiles, rebuild an existing workspace's kit and worlds, or
+generate an additional world from an existing kit:
 
 ```sh
 nix develop --command cargo run --locked --example generate_neighbourhood -- WORKSPACE
-# Existing kit: seed, width, depth, houses, planting percentage
-nix develop --command cargo run --locked --example generate_neighbourhood -- WORKSPACE 23 7 7 3 45
+# Replace the workspace's tiles, rules and worlds with the current kit:
+nix develop --command cargo run --locked --example generate_neighbourhood -- WORKSPACE --replace-kit
+# Existing kit: seed, width, depth, lots, planting percentage
+nix develop --command cargo run --locked --example generate_neighbourhood -- WORKSPACE 23 7 7 6 45
 ```
 
-The generator saves versioned `.tile`, `.world`, and `.sockets` JSON documents;
-old character-only workspaces still load. Existing resource paths are preserved.
+To review tiles and worlds without the editor UI, render them from an
+RTS-style camera (optionally with `--shot NAME:YAW:PITCH:DISTANCE[:X:Y:Z]`):
+
+```sh
+nix develop --command cargo run --locked --example world_shot -- test_workspace artifacts/shots --shadows
+nix develop --command cargo run --locked --example world_shot -- test_workspace artifacts/tiles --shadows --gallery tree,building
+```
+
+The generator saves versioned `.tile`, `.world`, and `.sockets` JSON documents
+(arrays of plain values and short flat objects such as voxel volumes are written
+on one line); old character-only workspaces still load. Existing resource paths are preserved.
 `library.json` remains a compatibility snapshot. Source files are loaded in path
 order; stable asset IDs preserve graph references independently of that order.
 
@@ -365,7 +412,8 @@ nix develop --command python3 scripts/resize_smoke.py --editor-view tiles
 The tile scenario uses real controls to author voxels, sockets and collision,
 toggle a rule in the matrix, place a road corner by clicking an open socket in
 the viewport, generate/save/revert/reopen a world, and walk from the road up the
-curb, along an entrance path, through a doorway, and into a blocking wall.
+curb, across the sidewalk and front garden path, through a house's doorway, and
+into its back wall.
 
 ## Automated visual loop (Linux)
 

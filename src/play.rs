@@ -219,6 +219,7 @@ fn setup_environment(
     }
     commands.spawn((
         ContactShadow,
+        bevy::light::NotShadowCaster,
         Mesh3d(meshes.add(Circle::new(0.65))),
         MeshMaterial3d(materials.add(StandardMaterial {
             base_color: Color::srgba(0.03, 0.07, 0.09, 0.22),
@@ -232,8 +233,15 @@ fn setup_environment(
     commands.spawn((
         DirectionalLight {
             illuminance: 8000.,
+            shadow_maps_enabled: true,
             ..default()
         },
+        bevy::light::CascadeShadowConfigBuilder {
+            first_cascade_far_bound: 12.,
+            maximum_distance: 120.,
+            ..default()
+        }
+        .build(),
         Transform::from_xyz(-3., 7., 5.).looking_at(Vec3::ZERO, Vec3::Y),
     ));
     commands.spawn((Camera3d::default(), GameCamera, Transform::default()));

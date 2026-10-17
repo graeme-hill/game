@@ -6,6 +6,9 @@ editor: Explorer/Outline on the left, tabbed 3D viewport, Inspector on the right
 Editor state and actions live in `src/editor/{mod,actions,fields}.rs`; the UI in
 `src/editor/ui/` is rebuilt from that state. See `README.md` for its features. Character animations and a third-person
 playground, socket-connected voxel tiles, and seeded neighbourhood generation are implemented.
+The starter tile kit is drawn in `src/kit/` and assembled by `src/generation.rs`;
+regenerate `test_workspace` with `examples/generate_neighbourhood.rs --replace-kit`
+and review tiles/worlds from an RTS-style camera with `examples/world_shot.rs`.
 Run `scripts/tiles_smoke.py` for tile/world editing and terrain collision coverage.
 Run `scripts/motion_smoke.py`
 for animation editing and keyboard/mouse gameplay interaction coverage.

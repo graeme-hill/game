@@ -75,8 +75,15 @@ pub fn setup(mut commands: Commands, mut gizmo_config: ResMut<GizmoConfigStore>)
     commands.spawn((
         DirectionalLight {
             illuminance: 8000.,
+            shadow_maps_enabled: true,
             ..default()
         },
+        bevy::light::CascadeShadowConfigBuilder {
+            first_cascade_far_bound: 20.,
+            maximum_distance: 400.,
+            ..default()
+        }
+        .build(),
         Transform::from_xyz(3., 7., 5.).looking_at(Vec3::ZERO, Vec3::Y),
     ));
 }

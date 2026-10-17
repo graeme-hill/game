@@ -47,9 +47,9 @@ def main():
         def capture(name):
             s.capture(name, neutral=True)
 
-        for name in ["Road straight", "Road corner", "Front door"]:
+        for name in ["Road straight", "Road corner", "House ground floor (cream)", "Waterfall"]:
             open_resource(s, "Tile", name)
-            capture(name.lower().replace(" ", "-"))
+            capture(name.lower().replace(" ", "-").replace("(", "").replace(")", ""))
         # Author a new source asset through visible controls.
         s.new_resource("Tile")
         s.type_and_commit("Smoke tile")
@@ -164,10 +164,11 @@ def main():
             return (v["position"][0] - start[0]) * forward[0] + (v["position"][2] - start[2]) * forward[1]
         xdo("keydown", "w")
         curb = wait(lambda v: distance(v) > 1. and v["position"][1] > .18, "step from road onto sidewalk")
-        door = wait(lambda v: distance(v) > 10.7, "walk along path and through front door")
+        # Spawn is 1 m from the curb; the house door is 6.6 m ahead, its back wall 12.8 m.
+        door = wait(lambda v: distance(v) > 7.4, "walk along path and through front door")
         xdo("keyup", "w")
         wait(lambda v: v["speed"] < .01, "stop inside house")
-        assert abs(door["position"][1] - .2) < .03
+        assert abs(door["position"][1] - .4) < .03, door["position"]
         xdo("key", "F12")
         capture_path = output / "play/screenshot-001.png"
         wait_for(lambda: capture_path.exists(), "house capture", game)
@@ -183,14 +184,14 @@ def main():
         # then keep pushing to show the wall holds.
         xdo("keydown", "w")
         try:
-            wait_for(lambda: distance(state()) > 13.9, "reach the back wall", game, timeout=30)
+            wait_for(lambda: distance(state()) > 12.4, "reach the back wall", game, timeout=30)
         except TimeoutError:
             pass
         time.sleep(2)
         xdo("keyup", "w")
         wait(lambda v: v["speed"] < .01, "wall stop")
         wall = state()
-        assert 14 < distance(wall) < 16.4, (distance(wall), wall["position"])
+        assert 12.2 < distance(wall) < 12.8, (distance(wall), wall["position"])
         for name in ["tiles.log", "reopened.log", "play.log"]:
             log = (output / name).read_text()
             errors = [line for line in log.splitlines() if (" ERROR " in line and "gilrs" not in line) or "panicked at" in line]

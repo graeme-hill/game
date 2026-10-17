@@ -99,6 +99,8 @@ pub fn spawn_body_at(
             Mesh3d(meshes.add(Cuboid::from_size(Vec3::ONE))),
             MeshMaterial3d(materials.add(material)),
             transform,
+            // The proxy cube is only a raymarching volume; it must not cast a box shadow.
+            bevy::light::NotShadowCaster,
         ))
         .id()
 }
